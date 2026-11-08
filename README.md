@@ -9,13 +9,15 @@ program, with a small menu for window size, fullscreen, smoothing, FPS, volume, 
 **This repository contains no game code, graphics data or ROM contents.** You need your own copy of the game as a ROM file.
 The builder reads it on your PC and produces `MagicalPopn.exe`.
 
-**This is version 0.9, so there is a slight chance of bugs.**
+**This is version 0.9.1, so there is a slight chance of bugs.**
 
 ## Native 16:9 widescreen
 
 <p align="center"><img src="assets/widescreen_comparison.png" alt="The start of stage 4 in the original 4:3 and in native 16:9" width="100%"></p>
 
 Levels are rendered wider rather than stretched, so the pixels keep their shape and the extra columns on each side show the real level and its enemies.
+
+16:9 mode is still undergoing active testing and there might be a few visual glitches. 4:3 is the best experience for now, but 16:9 is almost perfect.
 
 ## Quick start
 

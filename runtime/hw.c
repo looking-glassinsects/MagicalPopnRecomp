@@ -151,7 +151,7 @@ typedef struct { int delta; int locked; int first_h; int stride; int scrolled; i
 static WsAnchor g_anchor[2] = {{-1, 0, -1, 0, 0, 0}, {-1, 0, -1, 0, 0, 0}};
 static void ws_reset_anchors(void) { for (int i = 0; i < 2; i++) { g_anchor[i].delta = -1; g_anchor[i].locked = 0; g_anchor[i].first_h = -1; g_anchor[i].stride = 0; g_anchor[i].scrolled = 0; } }
 
-static int g_dbg_best, g_dbg_total, g_dbg_nseen, g_dbg_odd;
+static int g_dbg_best, g_dbg_best_d, g_dbg_best_rd, g_dbg_total, g_dbg_nseen, g_dbg_odd;
 static int g_ws_failed; static char g_ws_fail_info[200];
 int hw_ws_failed(const char **info) { if (info) *info = g_ws_fail_info; return g_ws_failed; }
 /* Find where the visible part of the hardware tilemap sits in the level map. Columns: ring
@@ -202,7 +202,7 @@ static int ws_match(Ppu *ppu, int layer, const uint8_t *base, int stride, int ro
             if (score > best) { best = score; best_d = d; best_rd = rd; }
         }
     }
-    g_dbg_best = best;
+    g_dbg_best = best; g_dbg_best_d = best_d; g_dbg_best_rd = best_rd;
     if (best * 100 < total * 92) { a->locked = 0; return -1; }
     a->delta = best_d; a->rdelta = best_rd; a->locked = 1;
     return best_d;
@@ -295,6 +295,18 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
         if (d < 0 && g_dbg_best == -1 && a->delta >= 0 && a->stride == stride &&
             ws_verify(ppu, l, base, stride, rows, a->delta, a->rdelta) >= 920) {
             d = a->delta; a->locked = 1;                          /* featureless view: keep last anchor */
+        }
+        /* The game draws some things into the tilemap only (not the level map), so a scene can
+         * briefly fall under the bar for finding an anchor from scratch. The anchor already
+         * known just has to go on fitting; a real change of scene or scroll wrap won't. */
+        if (d < 0 && g_dbg_best >= 0 && a->delta >= 0 && a->stride == stride &&
+            ws_verify(ppu, l, base, stride, rows, a->delta, a->rdelta) >= 650) {
+            d = a->delta; a->locked = 1;
+        }
+        /* ...and when the anchor itself moves (the map position wraps) during such a moment,
+         * a clear best fit in the same scene is taken rather than dropping to 4:3 */
+        if (d < 0 && g_dbg_best * 100 >= g_dbg_total * 75 && a->delta >= 0 && a->stride == stride) {
+            d = g_dbg_best_d; a->delta = d; a->rdelta = g_dbg_best_rd; a->locked = 1;
         }
         if (d < 0 && l == 0 && g_dbg_best == -1 &&                /* playfield too featureless to anchor */
             (ppu->bgLayer[1].hScroll & 0x3ff) == (ppu->bgLayer[0].hScroll & 0x3ff) &&

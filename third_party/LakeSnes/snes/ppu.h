@@ -151,6 +151,7 @@ struct Ppu {
   uint32_t spriteOverflowLines; // [recomp] lines that went over the limit (diagnostics)
   int spriteMaxOnLine, sliverMaxOnLine; // [recomp] busiest line seen (diagnostics)
   bool wsBlank;
+  int wsEdgeScroll; // [widescreen] BG1 scroll at the top of the frame: the level edges (lxMin/lxMax) are relative to it
   bool wsDebugLayers;
   uint8_t wsLineLayer[256 + 2 * PPU_WS_MAX]; // [widescreen] layer shown per dot on the current line   // debug: color extension pixels by the layer that produced them
   struct {

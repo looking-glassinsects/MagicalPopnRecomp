@@ -292,6 +292,7 @@ void ppu_runLine(Ppu* ppu, int line) {
   if(line == 1) {
     ppu->wsBlank = false;
     if(ws && ppu->wsFrameHook) ppu->wsFrameHook(ppu, ppu->wsUser);
+    ppu->wsEdgeScroll = ppu->bgLayer[0].hScroll;
   }
   int row = (line - 1) + (ppu->evenFrame ? 0 : 239);
   // clear the whole wide line (the extension stays black when it isn't drawn)
@@ -337,8 +338,9 @@ static void ppu_handlePixel(Ppu* ppu, int x, int y) {
   int g = 0, g2 = 0;
   int b = 0, b2 = 0;
   // [widescreen] beyond the level's own edges there is nothing to show: everything is black
+  // (measured with the frame's own scroll: bands of a line-scrolled scene have other values)
   int outOfBounds = (x < 0 || x > 255) && ppu->wsSrc[0].valid && ppu->wsSrc[0].clamp &&
-    (x + ppu->bgLayer[0].hScroll < ppu->wsSrc[0].lxMin || x + ppu->bgLayer[0].hScroll >= ppu->wsSrc[0].lxMax);
+    (x + ppu->wsEdgeScroll < ppu->wsSrc[0].lxMin || x + ppu->wsEdgeScroll >= ppu->wsSrc[0].lxMax);
   if(!ppu->forcedBlank) {
     int mainLayer = ppu_getPixel(ppu, x, y, false, &r, &g, &b);
     ppu->wsLineLayer[x + PPU_WS_MAX] = (uint8_t)mainLayer;
