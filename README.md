@@ -111,13 +111,13 @@ moments, such as the heroine running past the dust cloud on the title screen. Wi
 every sprite is drawn. Turn it on for the original look. Only the picture changes: the game still
 sees the hardware's overflow flags as before, so it plays the same.
 
-**Continue on launch** (on by default) saves your exact place when you quit and resumes it the
+**Continue on launch** (off by default) saves your exact place when you quit and resumes it the
 next time you start. Settings are saved in `settings.ini` next to the game, and save states
 in `states\`.
 
 ### Smoothness and latency
 
-- **Motion smoothing** (**120** fps by default, screens faster than 75 Hz; **60** turns it off):
+- **Motion smoothing** (off by default; set it to **120** under Video, for screens faster than 75 Hz):
   the game still runs at its native 60 fps, and an in-between picture is drawn after every game
   frame. On a 240 Hz monitor each picture stays up for exactly two refreshes, on a 120 Hz one
   for one. A 144 Hz monitor can't divide 120 evenly, so there every refresh gets its own
@@ -145,7 +145,7 @@ in `states\`.
 
 <p align="center"><img src="assets/widescreen_stage4.png" alt="The start of stage 4 in native 16:9" width="100%"></p>
 
-Widescreen (16:9 by default) is **rendered natively, not stretched**: the game shows more of
+Widescreen (off by default; choose it under Video) is **rendered natively, not stretched**: the game shows more of
 the level at both sides. Magical Pop'n only keeps one screen-and-a-bit of the level in video
 memory, but it holds a much wider strip of the decoded level map in WRAM. Each frame, the
 renderer finds where the visible picture sits in that map and draws the extra columns from it,

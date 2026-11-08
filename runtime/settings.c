@@ -17,10 +17,10 @@ void settings_reset_keys(Settings *s) {
 }
 
 void settings_defaults(Settings *s) {
-    s->scale = 3; s->fullscreen = 0; s->aspect = ASPECT_PIXEL; s->widescreen = WS_16_9; s->integer_scale = 0; s->smooth = 0;
+    s->scale = 3; s->fullscreen = 0; s->aspect = ASPECT_PIXEL; s->widescreen = WS_OFF; s->integer_scale = 0; s->smooth = 0;
     s->show_fps = 0; s->volume = 100; s->mute = 0; s->pause_unfocused = 1; s->ff_speed = FF_4X;
     s->language = (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_JAPANESE) ? LANG_JA : LANG_EN;
-    s->vsync = 1; s->low_latency = 1; s->motion_smooth = 120; s->scanlines = 0; s->sprite_limit = 0; s->mute_unfocused = 0; s->resume = 1; s->slot = 1;
+    s->vsync = 1; s->low_latency = 0; s->motion_smooth = 60; s->scanlines = 0; s->sprite_limit = 0; s->mute_unfocused = 0; s->resume = 0; s->slot = 1;
     s->win_x = s->win_y = -32000;
     settings_reset_keys(s);
 }
@@ -40,7 +40,7 @@ void settings_load(const char *path) {
     GETI("general", "fast_forward", ff_speed);
     GETI("display", "vsync", vsync);       GETI("display", "low_latency", low_latency);
     /* older versions saved motion_smoothing = 0/1 (off / every refresh) */
-    s->motion_smooth = GetPrivateProfileIntA("display", "motion_smoothing", 1, path) ? 120 : 60;
+    s->motion_smooth = GetPrivateProfileIntA("display", "motion_smoothing", s->motion_smooth > 60, path) ? 120 : 60;
     GETI("display", "motion_fps", motion_smooth);
     GETI("display", "scanlines", scanlines); GETI("display", "sprite_limit", sprite_limit); GETI("sound", "mute_unfocused", mute_unfocused);
     GETI("general", "resume", resume);     GETI("general", "slot", slot);
