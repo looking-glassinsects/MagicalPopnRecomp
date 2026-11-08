@@ -1,0 +1,21 @@
+# Game data must never be committed
+*.sfc
+*.smc
+*.swc
+*.fig
+*.zip
+*.bin
+*.srm
+
+# Build output (generated code is derived from the ROM)
+build/
+MagicalPopn/
+*.exe
+*.obj
+*.res
+*.ico
+*.png
+__pycache__/
+/toolchain/
+!/assets/*.png
+!/assets/*.ico
