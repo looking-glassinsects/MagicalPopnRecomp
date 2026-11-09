@@ -9,7 +9,7 @@ program, with a small menu for window size, fullscreen, smoothing, FPS, volume, 
 **This repository contains no game code, graphics data or ROM contents.** You need your own copy of the game as a ROM file.
 The builder reads it on your PC and produces `MagicalPopn.exe`.
 
-**This is version 0.9.1, so there is a slight chance of bugs.**
+**This is version 0.9.2, so there is a slight chance of bugs.**
 
 ## Native 16:9 widescreen
 
