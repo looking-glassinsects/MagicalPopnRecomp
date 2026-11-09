@@ -120,8 +120,8 @@ in `states\`.
 - **Motion smoothing** (off by default; set it to **120** under Video, for screens faster than 75 Hz):
   the game still runs at its native 60 fps, and an in-between picture is drawn after every game
   frame. On a 240 Hz monitor each picture stays up for exactly two refreshes, on a 120 Hz one
-  for one. A 144 Hz monitor can't divide 120 evenly, so there every refresh gets its own
-  picture. A display thread redraws the frame with the console's own
+  for one. A 144 Hz monitor can't divide 120 evenly, so it gets a new picture on 5 refreshes out of
+  every 6. A display thread redraws the frame with the console's own
   graphics chip, with each layer's scroll position and every sprite placed where they are at
   that exact moment between the last two frames. Pixel art stays crisp: nothing is blended or
   smeared. Pictures are timed by a clock locked to the monitor's real refresh signal, so each

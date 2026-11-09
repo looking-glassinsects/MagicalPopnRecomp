@@ -164,6 +164,7 @@ static uint16_t bot_input(uint32_t f) {
         memcpy(g_prev_wram, w, sizeof g_prev_wram);
         if (diff < 64) g_stall = 6;
     }
+    { static int tour = -1; if (tour < 0) tour = getenv("POPN_TOUR") != NULL; if (tour) g_stall = 0; }
     if (g_stall > 0) { g_stall--; return 1 << BTN_START; }
     if (f % 45 < 4 && f < 1200) return 1 << BTN_A;
     if (g_hold_left-- <= 0) {
@@ -189,6 +190,48 @@ static void on_vblank_headless(void) {
     int n = hw_take_samples(g_native, 4096);
     if (g_wav) { fwrite(g_native, 4, n, g_wav); g_wav_frames += n; }
     if (g_bot) hw_set_buttons(bot_input(g_frames_run));
+    {   /* POPN_TOUR="stage,area,frame": jump there at that frame (the game's own debug warp) and,
+         * from then on, stay invincible and log per-frame health of that area to stdout at the end */
+        static int init, stage, area, chapter, at = -1; static uint32_t pc_hist_pc[32], pc_hist_n[32]; static int pc_n;
+        static unsigned frames, fail, blacksides; static uint32_t lag_pc;
+        static uint8_t px[HW_WIDE_MAX_W * 224 * 4];
+        static unsigned rooms[16][16];
+        if (!init) { init = 1; const char *e = getenv("POPN_TOUR"); if (e && sscanf(e, "%d,%d,%d,%d", &stage, &area, &at, &chapter) != 4) at = -1; }
+        if (at >= 0) {
+            uint8_t *w = (uint8_t *)hw_wram();
+            if ((int)g_frames_run == at) { w[0x480] = (uint8_t)chapter; w[0x481] = 0; w[0x482] = 1; w[0x483] = 0; w[0x486] = 1; w[0x487] = 0; }
+            if ((int)g_frames_run == at + 260) { w[0x480] = (uint8_t)stage; w[0x481] = 0; w[0x482] = (uint8_t)area; w[0x483] = 0; w[0x486] = 1; w[0x487] = 0; }
+            if ((int)g_frames_run > at) {
+                w[0x5C] = 1;                                   /* MUTEKI */
+                if ((int)g_frames_run > at + 460) {
+                    const char *info;
+                    frames++;
+                    fail += hw_ws_failed(&info) != 0;
+                    { int s = w[0x480], a = w[0x482] & 15; if (s == stage && a < 16) rooms[1][a]++; else rooms[0][0]++; }
+                    int found = 0;
+                    for (int i = 0; i < pc_n; i++) if (pc_hist_pc[i] == rt_loop_pc) { pc_hist_n[i]++; found = 1; break; }
+                    if (!found && pc_n < 32) { pc_hist_pc[pc_n] = rt_loop_pc; pc_hist_n[pc_n++] = 1; }
+                    int ww = hw_get_pixels_wide(px);
+                    if (ww > 256) {
+                        int es = (ww - 256) / 2, black = 0, cb = 0;
+                        for (int y = 32; y < 224; y += 2) {
+                            for (int x = 0; x < es; x += 2) { const uint8_t *p = px + (y * ww + x) * 4; black += !p[0] && !p[1] && !p[2]; }
+                            for (int x = es; x < es + 256; x += 2) { const uint8_t *p = px + (y * ww + x) * 4; cb += !p[0] && !p[1] && !p[2]; }
+                        }
+                        blacksides += black > 150 && cb < 2500;
+                    }
+                }
+            }
+            if (g_frames_run + 1 >= g_max_frames) {
+                uint32_t top = 0; unsigned tn = 0, all = 0;
+                for (int i = 0; i < pc_n; i++) { all += pc_hist_n[i]; if (pc_hist_n[i] > tn) { tn = pc_hist_n[i]; top = pc_hist_pc[i]; } }
+                (void)lag_pc;
+                printf("TOUR %d %d frames %u ws_fail %u black_sides %u spin_pc %06X lag %u rooms", stage, area, frames, fail, blacksides, top, all - tn);
+                for (int s = 0; s < 16; s++) for (int a = 0; a < 16; a++) if (rooms[s][a]) printf(" %d-%d:%u", s, a, rooms[s][a]);
+                printf("\n");
+            }
+        }
+    }
     {   /* debug: POPN_INPUT="FROM-TO:MASK,..." holds buttons (BTN_* bit mask, hex) on those frames */
         static int init, n; static unsigned from[64], to[64], mask[64];
         if (!init) {

@@ -555,6 +555,14 @@ static int dt_refreshes_per_picture(double hz) {
     return k;
 }
 
+/* Is refresh number idx due a new picture? Never more than 120 a second: screens that divide
+ * 120 evenly use every k-th refresh; others (144 Hz, 165 Hz) skip refreshes as evenly as they
+ * can, so a 144 Hz screen gets a new picture on 5 refreshes out of every 6. */
+static int dt_due(long long idx, double hz, int k) {
+    if (hz < 125.0 || fabs(hz / k - 120.0) < 3.0) return idx % k == 0;
+    return floor((double)(idx + 1) * 120.0 / hz) != floor((double)idx * 120.0 / hz);
+}
+
 /* The monitor's real vertical blank, from the display driver (gdi32's D3DKMT calls). Swap
  * calls alone don't say when the screen refreshes: with a frame queue they often return at
  * once, so timing taken from them drifts against the real refresh and motion jitters. */
@@ -711,7 +719,7 @@ static void display_loop_vblank(FILE *pace) {
         double now = plat_now_ms();
         long long idx = AN + (long long)ceil((now + 1.0 - A) / P);   /* at least 1 ms away */
         if (last_idx != LLONG_MIN && idx <= last_idx) idx = last_idx + 1;
-        while (idx % k) idx++;
+        { double nominal = floor(1000.0 / P + 0.5); while (!dt_due(idx, nominal, k)) idx++; }
         double v = A + (double)(idx - AN) * P;
         if (v - now > 50) { Sleep(5); continue; }           /* clock jumped: re-read it */
         plat_sleep_until_ms(v - ahead);

@@ -147,16 +147,16 @@ void hw_get_pixels(uint8_t *px) { snes_setPixels(g, px); }
  * screens that don't use this layout: title, menus, cutscenes. */
 /* scrolled: the camera has moved since this scene's anchor was found. Cutscenes and menus
  * that happen to use the same map system never scroll, so they stay pillarboxed. */
-typedef struct { int delta; int locked; int first_h; int stride; int scrolled; int rdelta; } WsAnchor;
-static WsAnchor g_anchor[2] = {{-1, 0, -1, 0, 0, 0}, {-1, 0, -1, 0, 0, 0}};
-static void ws_reset_anchors(void) { for (int i = 0; i < 2; i++) { g_anchor[i].delta = -1; g_anchor[i].locked = 0; g_anchor[i].first_h = -1; g_anchor[i].stride = 0; g_anchor[i].scrolled = 0; } }
+typedef struct { int delta; int locked; int first_h; int stride; int scrolled; int rdelta; int miss; } WsAnchor;
+static WsAnchor g_anchor[2] = {{-1, 0, -1, 0, 0, 0, 0}, {-1, 0, -1, 0, 0, 0, 0}};
+static void ws_reset_anchors(void) { for (int i = 0; i < 2; i++) { g_anchor[i].delta = -1; g_anchor[i].locked = 0; g_anchor[i].first_h = -1; g_anchor[i].stride = 0; g_anchor[i].scrolled = 0; g_anchor[i].miss = 0; } }
 
 static int g_dbg_best, g_dbg_best_d, g_dbg_best_rd, g_dbg_total, g_dbg_nseen, g_dbg_odd;
 static int g_ws_failed; static char g_ws_fail_info[200];
 int hw_ws_failed(const char **info) { if (info) *info = g_ws_fail_info; return g_ws_failed; }
 /* Find where the visible part of the hardware tilemap sits in the level map. Columns: ring
- * offset `delta`. Rows: the tilemap is a 32-row ring too, so level row = screen row + 64*k for
- * some k (1024 px of vertical scroll per wrap); a->rdelta receives 64*k. Only the rows that
+ * offset `delta`. Rows: the tilemap is a 32-row ring too, so level row = screen row + 32*k for
+ * some k (a->rdelta receives that multiple of 32 rows, the height of the tilemap). Only the rows that
  * are actually on screen are compared. */
 static int ws_match(Ppu *ppu, int layer, const uint8_t *base, int stride, int rows, WsAnchor *a) {
     int w = stride / 2;
@@ -184,8 +184,9 @@ static int ws_match(Ppu *ppu, int layer, const uint8_t *base, int stride, int ro
         g_dbg_nseen = nseen; g_dbg_odd = odd; g_dbg_best = -1; g_dbg_total = total;
         if (nseen < 4 || odd < 24) { a->locked = 0; return -1; }
     }
-    for (int kk = -1; kk * 64 < rows; kk++) {
-        int rd = 64 * kk;
+    /* the tilemap repeats every 32 rows, so tall rooms can sit at any multiple of 32 */
+    for (int kk = -2; kk * 32 < rows; kk++) {
+        int rd = 32 * kk;
         int ok_rows = 1;
         for (int j = 0; j < NR; j++) { int r = lrow[j] + rd; if (r < 0 || r >= rows) { ok_rows = 0; break; } }
         if (!ok_rows) continue;
@@ -308,6 +309,10 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
         if (d < 0 && g_dbg_best * 100 >= g_dbg_total * 75 && a->delta >= 0 && a->stride == stride) {
             d = g_dbg_best_d; a->delta = d; a->rdelta = g_dbg_best_rd; a->locked = 1;
         }
+        /* a frame or two that can't be matched (screen shake, tiles being rewritten) mustn't
+         * flash the sides: carry on with the last good position for a moment */
+        if (d >= 0) a->miss = 0;
+        else if (a->delta >= 0 && a->stride == stride && a->miss < 10 && !ppu->forcedBlank) { a->miss++; d = a->delta; a->locked = 1; }
         if (d < 0 && l == 0 && g_dbg_best == -1 &&                /* playfield too featureless to anchor */
             (ppu->bgLayer[1].hScroll & 0x3ff) == (ppu->bgLayer[0].hScroll & 0x3ff) &&
             (ppu->bgLayer[1].vScroll & 0x3ff) == (ppu->bgLayer[0].vScroll & 0x3ff) &&
@@ -346,6 +351,34 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
                 }
             }
             rows = bytes / stride;
+            /* Doors and similar objects are written into the tilemap only, never into the level
+             * map the extension is drawn from. Remember what the tilemap shows wherever it
+             * differs from the level map, for as long as that spot of the level map itself
+             * stays the same, so such things stay drawn after they scroll into the wide area. */
+            {
+                static uint8_t ov_on[2][0x1F80]; static uint16_t ov_tile[2][0x1F80], ov_base[2][0x1F80];
+                static int ov_stride[2];
+                int ww = stride / 2, cells = bytes / 2;
+                if (ov_stride[l] != stride) { memset(ov_on[l], 0, sizeof ov_on[l]); ov_stride[l] = stride; }
+                int hs = ppu->bgLayer[l].hScroll & 0x3ff, vs = ppu->bgLayer[l].vScroll & 0x3ff;
+                uint16_t mp = ppu->bgLayer[l].tilemapAdr;
+                for (int j = 0; j < 14; j++) {
+                    int lr = (1 + 16 * j + vs) >> 4, r = lr + a->rdelta;
+                    if (r < 0 || r >= rows) continue;
+                    for (int k = 0; k < 17; k++) {
+                        int mc = (hs >> 4) + k, idx = r * ww + (mc + d) % ww;
+                        uint16_t vt = ppu->vram[(mp + (lr & 31) * 32 + (mc & 31)) & 0x7fff];
+                        uint16_t bt = (uint16_t)(base[idx * 2] | (base[idx * 2 + 1] << 8));
+                        if (vt != bt) { ov_on[l][idx] = 1; ov_tile[l][idx] = vt; ov_base[l][idx] = bt; }
+                        else ov_on[l][idx] = 0;
+                    }
+                }
+                for (int i = 0; i < cells; i++) {
+                    if (!ov_on[l][i]) continue;
+                    if ((uint16_t)(base[i * 2] | (base[i * 2 + 1] << 8)) != ov_base[l][i]) { ov_on[l][i] = 0; continue; }
+                    stable[l][i * 2] = (uint8_t)ov_tile[l][i]; stable[l][i * 2 + 1] = (uint8_t)(ov_tile[l][i] >> 8);
+                }
+            }
             ppu->wsSrc[l].valid = true; ppu->wsSrc[l].base = stable[l]; ppu->wsSrc[l].stride = stride;
         }
         ppu->wsSrc[l].width = stride / 2; ppu->wsSrc[l].rows = rows; ppu->wsSrc[l].delta = d; ppu->wsSrc[l].rdelta = a->rdelta;
@@ -377,6 +410,21 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
             if (getenv("POPN_WS_DEBUG") && atoi(getenv("POPN_WS_DEBUG")) == 2)
                 fprintf(stderr, "   cam %d cam_r %d h %d clamp %d lx [%d,%d)\n", cam, cam_r, h, ppu->wsSrc[l].clamp, ppu->wsSrc[l].lxMin, ppu->wsSrc[l].lxMax);
             if (narrow && !ppu->wsSrc[l].clamp) { ppu->wsSrc[l].valid = false; continue; }
+        }
+    }
+    /* The final boss's arena (stage 195) is a backdrop that repeats by design and has no level
+     * map, so its side columns come straight from the hardware tilemaps. */
+    if (!ppu->wsSrc[0].valid && (s->ram[0x480] | (s->ram[0x481] << 8)) == 195 && ppu->mode == 1 && !ppu->forcedBlank) {
+        static uint8_t arena[2][0x800];
+        for (int l = 0; l < 2; l++) {
+            if (!ppu->bgLayer[l].bigTiles || ppu->bgLayer[l].tilemapWider) continue;
+            for (int i = 0; i < 0x400; i++) {
+                uint16_t w = ppu->vram[(ppu->bgLayer[l].tilemapAdr + i) & 0x7fff];
+                arena[l][i * 2] = (uint8_t)w; arena[l][i * 2 + 1] = (uint8_t)(w >> 8);
+            }
+            ppu->wsSrc[l].valid = true; ppu->wsSrc[l].base = arena[l]; ppu->wsSrc[l].stride = 64;
+            ppu->wsSrc[l].width = 32; ppu->wsSrc[l].rows = 32; ppu->wsSrc[l].delta = 0; ppu->wsSrc[l].rdelta = 0;
+            ppu->wsSrc[l].vring = 1; ppu->wsSrc[l].clamp = false;
         }
     }
     /* without a verified playfield source there is nothing correct to show at the sides */
@@ -558,15 +606,15 @@ static int ip_lerp(int prev, int cur, int mod, int maxd, float t) {
  * whole object out of place for a picture. So the motion is decided per object (sprites that
  * touch): the motion most of its pieces agree on, which every piece of it then follows. An
  * object whose pieces don't agree is changing shape and is drawn as it is now. */
-#define IP_NEAR 20            /* sprites closer than this (top-left to top-left) are one object */
 static int ip_debug(void) {   /* POPN_IP_DEBUG: print each object's matching to stderr */
     static int v = -1;
     if (v < 0) v = getenv("POPN_IP_DEBUG") != NULL;
     return v;
 }
 static void ip_sprite_motion(int xs[2][128], int ys[2][128], int sz[2][128], uint16_t key[2][128],
-                             const uint32_t *gfx_prev, const uint32_t *gfx_cur,
+                             const uint32_t *gfx_prev, const uint32_t *gfx_cur, int obj_size,
                              int *mdx, int *mdy, int *have) {
+    static const int SIZES[8][2] = {{8, 16}, {8, 32}, {8, 64}, {16, 32}, {16, 64}, {32, 64}, {16, 32}, {16, 32}};
     enum { MAXC = 6 };
     int nc[128], cx[128][MAXC], cy[128][MAXC], cg[128][MAXC], on[128];
     for (int i = 0; i < 128; i++) {
@@ -588,7 +636,10 @@ static void ip_sprite_motion(int xs[2][128], int ys[2][128], int sz[2][128], uin
         for (int j = i + 1; j < 128; j++) {
             if (!on[j]) continue;
             int ox = ((xs[1][i] - xs[1][j] + 256) & 511) - 256, oy = ((ys[1][i] - ys[1][j] + 128) & 255) - 128;
-            if (abs(ox) > IP_NEAR || abs(oy) > IP_NEAR) continue;
+            /* pieces whose boxes touch belong together, whatever their size: big sprites stacked
+             * into one tall object (a flame pillar, a boss) must move as one or a seam opens */
+            int si = SIZES[obj_size & 7][sz[1][i]], sj = SIZES[obj_size & 7][sz[1][j]];
+            if (ox <= -(si + 2) || ox >= sj + 2 || oy <= -(si + 2) || oy >= sj + 2) continue;
             int a = i, b = j;
             while (par[a] != a) a = par[a] = par[par[a]];
             while (par[b] != b) b = par[b] = par[par[b]];
@@ -673,7 +724,7 @@ static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, u
                 key[f][i] = fr[f]->oam[i * 2 + 1];
             }
         int mdx_of[128], mdy_of[128], have_of[128];
-        ip_sprite_motion(xs, ys, sz, key, prev->gfx, cur->gfx, mdx_of, mdy_of, have_of);
+        ip_sprite_motion(xs, ys, sz, key, prev->gfx, cur->gfx, p->objSize, mdx_of, mdy_of, have_of);
         for (int i = 0; i < 128; i++) {
             int mdx = mdx_of[i], mdy = mdy_of[i], have = have_of[i];
             int x = xs[1][i], y = ys[1][i];
