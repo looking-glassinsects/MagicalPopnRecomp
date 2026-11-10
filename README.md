@@ -239,13 +239,13 @@ These are tracked on the [Issues](https://github.com/looking-glassinsects/Magica
 
 | # | Issue | Area |
 |---|---|---|
-| [2](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/2) | Boomerangs get stuck on the screen | 16:9 |
-| [3](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/3) | A few rooms (such as the ice palace) still show small glitches in the 16:9 side columns | 16:9 |
-| [6](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/6) | Side columns change while going through the tubes | 16:9 |
-| [7](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/7) | Mace ghosts and clones its sprite | Motion smoothing |
-| [8](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/8) | Sprite flickers on the spring in the first area | Graphics |
-| [9](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/9) | Bottom of open doors shimmers when walking past | Graphics |
-| [10](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/10) | Frame drops in some rooms and when lots is on screen | Performance |
+| 1 | [Boomerangs get stuck on the screen](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/2) | 16:9 |
+| 2 | [A few rooms (such as the ice palace) still show small glitches in the 16:9 side columns](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/3) | 16:9 |
+| 3 | [Side columns change while going through the tubes](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/6) | 16:9 |
+| 4 | [Mace ghosts and clones its sprite](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/7) | Motion smoothing |
+| 5 | [Sprite flickers on the spring in the first area](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/8) | Graphics |
+| 6 | [Bottom of open doors shimmers when walking past](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/9) | Graphics |
+| 7 | [Frame drops in some rooms and when lots is on screen](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/10) | Performance |
 
 > [!WARNING]
 > After loading a save state inside a narrow castle room, its 16:9 sides use the older method until you leave the room.
