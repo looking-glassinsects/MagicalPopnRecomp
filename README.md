@@ -131,13 +131,13 @@ right = A, left = Y, top = X. The game reads:
     and switches to their full report.
   - 8BitDo pads in D-input mode, common USB SNES-style pads, and the usual PC gamepad layout.
 
+</details>
+
 > [!TIP]
 > If a controller's buttons end up in the wrong places, open **Set up controller** on the **Controls** page of the F1 menu
 > and press each button when asked. <kbd>Esc</kbd> skips a button and <kbd>Backspace</kbd> stops. The layout is saved for
 > that kind of controller (`[pad VVVV-PPPP]` in `settings.ini`). **Reset to defaults** puts every
 > controller back to its built-in layout.
-
-</details>
 
 <details>
 <summary><b>The F1 menu</b></summary>
