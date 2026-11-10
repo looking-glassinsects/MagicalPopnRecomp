@@ -516,8 +516,30 @@ static void draw_all(void) {
     SwapBuffers(g_dc);
 }
 
+/* debug: POPN_SHOWN_LOG=file -> one line per picture actually shown: time, width, dark pixels in
+ * the left extension / 4:3 part / right extension (sampled every 2nd dot and line); with
+ * POPN_SHOWN_RAW=file also the raw BGRX pictures, back to back */
+static void shown_log(const uint8_t *px, int w) {
+    static FILE *f, *raw; static int init;
+    if (!init) {
+        init = 1;
+        const char *p = getenv("POPN_SHOWN_LOG"); if (p) f = fopen(p, "w");
+        p = getenv("POPN_SHOWN_RAW"); if (p) raw = fopen(p, "wb");
+    }
+    if (!f) return;
+    int es = (w - 256) / 2, d[3] = {0, 0, 0};
+    for (int y = 0; y < 224; y += 2)
+        for (int x = 0; x < w; x += 2) {
+            const uint8_t *q = px + ((size_t)y * w + x) * 4;
+            if (q[0] + q[1] + q[2] < 24) d[x < es ? 0 : x >= es + 256 ? 2 : 1]++;
+        }
+    fprintf(f, "%.3f %d %d %d %d\n", plat_now_ms(), w, d[0], d[1], d[2]);
+    if (raw) { fwrite(&w, 4, 1, raw); fwrite(px, 4, (size_t)w * 224, raw); }
+}
+
 void plat_present(const uint8_t *px, int width) {
     if (g_dt || width < 1 || width > 544) return;
+    shown_log(px, width);
     memcpy(g_frame, px, (size_t)width * 224 * 4);
     g_frame_w = width;
     glBindTexture(GL_TEXTURE_2D, t_game);
@@ -736,6 +758,7 @@ static void display_loop_vblank(FILE *pace) {
             g_frame_w = w;
             glBindTexture(GL_TEXTURE_2D, t_game);
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, 224, GL_BGRA_EXT, GL_UNSIGNED_BYTE, g_frame);
+            shown_log(g_dt_buf, w);
         }
         g_fps_frames++;
         /* present 1 ms after the refresh: clearly after it (so it can only be shown at the

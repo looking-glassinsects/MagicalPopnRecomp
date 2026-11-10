@@ -259,6 +259,19 @@ static void on_vblank_headless(void) {
             for (int i = 0; i < w * 224; i++) { rgb[i * 3] = g_mid[i * 4 + 2]; rgb[i * 3 + 1] = g_mid[i * 4 + 1]; rgb[i * 3 + 2] = g_mid[i * 4]; }
             snprintf(path, sizeof path, "%s/f%05u_mid.png", g_shot_dir, g_frames_run);
             png_write_rgb(path, rgb, w, 224);
+            /* POPN_SNAP_TEST=1: the pictures the display thread would show at t = .25/.5/.75, drawn
+             * through the same snapshot path (hw_snapshot_publish / hw_snapshot_render) */
+            if (getenv("POPN_SNAP_TEST")) {
+                const double F = 1000.0 / 60.0988, t0 = g_frames_run * F;
+                hw_snapshot_publish(t0);
+                for (int k = 1; k <= 3; k++) {
+                    int ww = hw_snapshot_render(t0 + k * F / 4, g_mid);
+                    if (!ww) continue;
+                    for (int i = 0; i < ww * 224; i++) { rgb[i * 3] = g_mid[i * 4 + 2]; rgb[i * 3 + 1] = g_mid[i * 4 + 1]; rgb[i * 3 + 2] = g_mid[i * 4]; }
+                    snprintf(path, sizeof path, "%s/f%05u_q%d.png", g_shot_dir, g_frames_run, k);
+                    png_write_rgb(path, rgb, ww, 224);
+                }
+            }
         }
     }
     if (g_shot_dir && g_shot_every && getenv("POPN_INTERP_TEST") && (g_frames_run + 1) % g_shot_every == 0) {
@@ -528,6 +541,22 @@ presented:
     }
     if (plat_focused()) bg_save_frame = -1;
     hw_set_buttons(plat_buttons());                     /* latched by the game right after this */
+    {   /* debug: POPN_LIVE_INPUT="FROM-TO:MASK,..." scripted buttons in the window too, and
+         * POPN_LIVE_FRAMES=N quits after N frames */
+        static int init, n, quit_at; static unsigned from[64], to[64], mask[64];
+        if (!init) {
+            init = 1;
+            const char *p = getenv("POPN_LIVE_INPUT");
+            while (p && *p && n < 64 && sscanf(p, "%u-%u:%x", &from[n], &to[n], &mask[n]) == 3) { n++; p = strchr(p, ','); if (p) p++; }
+            p = getenv("POPN_LIVE_FRAMES"); quit_at = p ? atoi(p) : 0;
+        }
+        if (n) {
+            unsigned m = 0;
+            for (int i = 0; i < n; i++) if (g_frames_run >= from[i] && g_frames_run <= to[i]) m |= mask[i];
+            hw_set_buttons((uint16_t)m);
+        }
+        if (quit_at && (int)g_frames_run >= quit_at) { snprintf(rt.halt_reason, sizeof rt.halt_reason, "quit"); longjmp(rt.exit_jmp, EXIT_QUIT); }
+    }
     g_exit_t = plat_now_ms();
 }
 

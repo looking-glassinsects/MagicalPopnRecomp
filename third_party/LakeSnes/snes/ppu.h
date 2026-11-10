@@ -151,14 +151,23 @@ struct Ppu {
   uint32_t spriteOverflowLines; // [recomp] lines that went over the limit (diagnostics)
   int spriteMaxOnLine, sliverMaxOnLine; // [recomp] busiest line seen (diagnostics)
   bool wsBlank;
-  int wsEdgeScroll; // [widescreen] BG1 scroll at the top of the frame: the level edges (lxMin/lxMax) are relative to it
+  int wsEdgeScroll; // [widescreen] BG1 scroll on the camera's line (wsCamLine) this picture: the level edges (lxMin/lxMax) are relative to it
+  int wsRefH;       // [widescreen] the (10-bit) BG1 scroll the level edges were worked out for
   bool wsDebugLayers;
+  int wsCamLine;                // [widescreen] line whose scroll is the camera's (the level edges follow it)
+  uint8_t wsDebugHide;         // [widescreen] debug: BG layers (bit n = BG n+1) not drawn at all
+  bool wsNoRecord;             // [widescreen] set while drawing an in-between picture
+  uint16_t wsLineH[2][240];     // [widescreen] BG1/BG2 horizontal scroll of each line of the last frame
+  int wsPgY[4], wsPgH[4], wsPg[4]; // [widescreen] page found for the line being drawn (cache)
   uint8_t wsLineLayer[256 + 2 * PPU_WS_MAX]; // [widescreen] layer shown per dot on the current line   // debug: color extension pixels by the layer that produced them
   struct {
     bool valid;
     const uint8_t* base;  // tile word for (row r, column c) at base[r * stride + c * 2]
     int stride, width, rows;
     int delta;            // column = floor((x + hScroll) / tileWidth) + delta, wrapped to width
+    int refCol;           // tilemap column (scroll / tileWidth) delta was found at; -1 = none. A line
+                          // scrolled elsewhere shows the same 32-column tilemap, so its delta is taken
+                          // at the page (multiple of 32 columns) nearest to this one
     int rdelta;           // row = floor((line + vScroll) / tileHeight) + rdelta (unwrapped)
     bool vring;           // rows wrap like the hardware map (VRAM-backed source) instead of rdelta
     bool clamp;           // if set, only x + hScroll in [lxMin, lxMax) is inside the map

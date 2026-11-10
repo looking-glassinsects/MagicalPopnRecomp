@@ -292,7 +292,16 @@ void ppu_runLine(Ppu* ppu, int line) {
   if(line == 1) {
     ppu->wsBlank = false;
     if(ws && ppu->wsFrameHook) ppu->wsFrameHook(ppu, ppu->wsUser);
-    ppu->wsEdgeScroll = ppu->bgLayer[0].hScroll;
+    for(int l = 0; l < 4; l++) ppu->wsPgY[l] = -100000;
+  }
+  // [widescreen] the camera's scroll for this picture (level edges are blacked out from it
+  // once the picture is complete, in ppu_putPixelsWide)
+  if(line == ppu->wsCamLine) ppu->wsEdgeScroll = ppu->bgLayer[0].hScroll;
+  // [widescreen] each line's own scroll, for the next frame's source matching (scenes drawn in
+  // bands that scroll separately); in-between pictures don't count
+  if(!ppu->wsNoRecord && line < 240) {
+    ppu->wsLineH[0][line] = ppu->bgLayer[0].hScroll;
+    ppu->wsLineH[1][line] = ppu->bgLayer[1].hScroll;
   }
   int row = (line - 1) + (ppu->evenFrame ? 0 : 239);
   // clear the whole wide line (the extension stays black when it isn't drawn)
@@ -321,9 +330,22 @@ void ppu_runLine(Ppu* ppu, int line) {
 int ppu_putPixelsWide(Ppu* ppu, uint8_t* pixels) {
   int ws = ppu->wsExtra < 0 ? 0 : ppu->wsExtra > PPU_WS_MAX ? PPU_WS_MAX : ppu->wsExtra;
   int width = 256 + 2 * ws;
+  // [widescreen] beyond the level's own edges there is nothing to show: black, full height.
+  // The edges follow the camera's line (in a scene drawn in bands, the band that moves with the
+  // camera), taken relative to the scroll they were worked out for, across the 1024 px wrap
+  // (an in-between picture's scroll can sit on the other side of the wrap from its frame's).
+  int blackL = -ws, blackR = 256 + ws;
+  if(ws && ppu->wsSrc[0].valid && ppu->wsSrc[0].clamp) {
+    int edgeH = ppu->wsRefH + ((((ppu->wsEdgeScroll & 0x3ff) - ppu->wsRefH + 512) & 0x3ff) - 512);
+    blackL = ppu->wsSrc[0].lxMin - edgeH; if(blackL > 0) blackL = 0;
+    blackR = ppu->wsSrc[0].lxMax - edgeH; if(blackR < 256) blackR = 256;
+  }
   for(int y = 0; y < 224; y++) {
     int line = ppu->frameOverscan ? y + 8 : y; // center 224 of 239 overscan lines
     int src = line + (ppu->evenFrame ? 0 : 239);
+    uint8_t* rowp = &ppu->wsBuffer[src * PPU_WS_PITCH];
+    if(blackL > -ws) memset(rowp + (PPU_WS_MAX - ws) * 4, 0, (size_t)(blackL + ws) * 4);
+    if(blackR < 256 + ws) memset(rowp + (PPU_WS_MAX + blackR) * 4, 0, (size_t)(256 + ws - blackR) * 4);
     memcpy(pixels + y * width * 4, &ppu->wsBuffer[src * PPU_WS_PITCH + (PPU_WS_MAX - ws) * 4], width * 4);
   }
   return width;
@@ -337,14 +359,9 @@ static void ppu_handlePixel(Ppu* ppu, int x, int y) {
   int r = 0, r2 = 0;
   int g = 0, g2 = 0;
   int b = 0, b2 = 0;
-  // [widescreen] beyond the level's own edges there is nothing to show: everything is black
-  // (measured with the frame's own scroll: bands of a line-scrolled scene have other values)
-  int outOfBounds = (x < 0 || x > 255) && ppu->wsSrc[0].valid && ppu->wsSrc[0].clamp &&
-    (x + ppu->wsEdgeScroll < ppu->wsSrc[0].lxMin || x + ppu->wsEdgeScroll >= ppu->wsSrc[0].lxMax);
   if(!ppu->forcedBlank) {
     int mainLayer = ppu_getPixel(ppu, x, y, false, &r, &g, &b);
     ppu->wsLineLayer[x + PPU_WS_MAX] = (uint8_t)mainLayer;
-    if(outOfBounds) { ppu->wsLineLayer[x + PPU_WS_MAX] = 7; goto ws_black; }   // past the level edge: black
     if(ppu->wsDebugLayers && (x < 0 || x > 255)) {   // [widescreen] debug: color by source layer
       static const uint8_t dc[7][3] = {{31,0,0},{0,31,0},{0,0,31},{31,31,0},{31,31,31},{31,0,31},{31,31,31}};
       r = r2 = dc[mainLayer][0]; g = g2 = dc[mainLayer][1]; b = b2 = dc[mainLayer][2];
@@ -398,10 +415,6 @@ static void ppu_handlePixel(Ppu* ppu, int x, int y) {
       r2 = r; g2 = g; b2 = b;
     }
   }
-  if(0) {
-ws_black:
-    r = g = b = r2 = g2 = b2 = 0;
-  }
 ws_store:;
   int row = (y - 1) + (ppu->evenFrame ? 0 : 239);
   // [widescreen] one pixel per dot for the wide output
@@ -442,6 +455,7 @@ static int ppu_getPixel(Ppu* ppu, int x, int y, bool sub, int* r, int* g, int* b
     }
     // [widescreen] layers not allowed to extend are transparent outside 0..255
     if(outside && curLayer < 4 && !(ppu->wsBgMask & (1 << curLayer)) && !ppu->wsSrc[curLayer].valid) layerActive = false;
+    if(curLayer < 4 && (ppu->wsDebugHide >> curLayer) & 1) layerActive = false;   // [widescreen] debug: layer hidden
     if(layerActive) {
       if(curLayer < 4) {
         // bg layer
@@ -562,10 +576,39 @@ static int ppu_getPixelForBgLayer(Ppu* ppu, int x, int y, int layer, bool priori
 
 // [widescreen] fetch the tile word from wsSrc instead of VRAM; x is unwrapped (may be < 0 or > 1023)
 static int ppu_getPixelForBgSource(Ppu* ppu, int x, int y, int layer, bool priority) {
-  if(ppu->wsSrc[layer].clamp && (x < ppu->wsSrc[layer].lxMin || x >= ppu->wsSrc[layer].lxMax)) return 0;
   int tileBits = ppu->bgLayer[layer].bigTiles ? 4 : 3;
   int tw = 1 << tileBits;
-  int col = (x >= 0 ? x / tw : -((-x + tw - 1) / tw)) + ppu->wsSrc[layer].delta;
+  // a band of lines scrolled elsewhere than where the source was matched (a scene drawn in bands
+  // with their own scroll) shows the same 32-column tilemap, whose columns can sit a whole tilemap
+  // width further along the level map: which page is found by comparing the line's visible tiles
+  int page = 0;
+  if(!ppu->wsSrc[layer].vring && ppu->wsSrc[layer].refCol >= 0) {
+    int h = ppu->bgLayer[layer].hScroll & 0x3ff;
+    int c0 = h >> tileBits, ref = ppu->wsSrc[layer].refCol;
+    if(c0 != ref) {
+      if(ppu->wsPgY[layer] == y && ppu->wsPgH[layer] == h) page = ppu->wsPg[layer];
+      else {
+        int guess = ref + (((c0 - ref + 16) & 31) - 16) - c0, best = -1;
+        int w = ppu->wsSrc[layer].width, r = (y >> tileBits) + ppu->wsSrc[layer].rdelta;
+        page = guess;
+        if(r >= 0 && r < ppu->wsSrc[layer].rows) {
+          const uint8_t* rowp = ppu->wsSrc[layer].base + r * ppu->wsSrc[layer].stride;
+          uint16_t mapRow = ppu->bgLayer[layer].tilemapAdr + (((y >> tileBits) & 0x1f) << 5);
+          for(int i = 0; i < 3; i++) {
+            int cand = guess + (i == 0 ? 0 : i == 1 ? -32 : 32), score = 0;
+            for(int k = 0; k < 17; k++) {
+              int col = (((c0 + k + ppu->wsSrc[layer].delta + cand) % w) + w) % w;
+              score += (uint16_t)(rowp[col * 2] | (rowp[col * 2 + 1] << 8)) == ppu->vram[(mapRow + ((c0 + k) & 0x1f)) & 0x7fff];
+            }
+            if(getenv("POPN_WS_PAGES")) fprintf(stderr, "page L%d y%d h%d c0 %d ref %d row %d cand %d score %d\n", layer, y, h, c0, ref, r, cand, score);
+            if(score > best) { best = score; page = cand; }
+          }
+        }
+        ppu->wsPgY[layer] = y; ppu->wsPgH[layer] = h; ppu->wsPg[layer] = page;
+      }
+    }
+  }
+  int col = (x >= 0 ? x / tw : -((-x + tw - 1) / tw)) + ppu->wsSrc[layer].delta + page;
   int w = ppu->wsSrc[layer].width;
   col = ((col % w) + w) % w;
   int row = ppu->wsSrc[layer].vring ? ((y & 0x3ff) >> tileBits) & 0x1f : (y >> tileBits) + ppu->wsSrc[layer].rdelta;

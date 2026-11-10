@@ -158,6 +158,35 @@ int hw_ws_failed(const char **info) { if (info) *info = g_ws_fail_info; return g
  * offset `delta`. Rows: the tilemap is a 32-row ring too, so level row = screen row + 32*k for
  * some k (a->rdelta receives that multiple of 32 rows, the height of the tilemap). Only the rows that
  * are actually on screen are compared. */
+/* Scenes drawn in bands that scroll separately (rooftops under a slow sky): each sample row's
+ * visible tilemap columns follow its own line's scroll, taken from the last frame relative to its
+ * first line. A row of another band may show tilemap columns that sit a whole tilemap width away
+ * in the level map; `pg` gets the first page to try for it (0 = scrolls with the first line). */
+static void ws_rows(const Ppu *ppu, int layer, int mc0, int *mcj, int *pg) {
+    int h = ppu->bgLayer[layer].hScroll & 0x3ff;
+    for (int j = 0; j < 14; j++) {
+        int line = 1 + 16 * j;
+        int off = ((ppu->wsLineH[layer][line] - ppu->wsLineH[layer][1] + 512) & 0x3ff) - 512;
+        mcj[j] = ((h + off) & 0x3ff) >> 4;
+        pg[j] = mcj[j] == mc0 ? 0 : mc0 + (((mcj[j] - mc0 + 16) & 31) - 16) - mcj[j];
+    }
+}
+/* matches in one sample row at anchor (d, rd): rows of the first line's band only at page 0,
+ * others at whichever nearby page fits best */
+static int ws_row_score(const uint8_t *base, int stride, int w, int row, int mc, int pg, int banded, const uint16_t *vc) {
+    int best = 0;
+    for (int i = 0; i < (banded ? 3 : 1); i++) {
+        int p = pg + (i == 0 ? 0 : i == 1 ? -32 : 32), s = 0;
+        const uint8_t *r = base + row * stride;
+        for (int k = 0; k < 17; k++) {
+            const uint8_t *q = r + ((((mc + k + p) % w) + w) % w) * 2;
+            s += (uint16_t)(q[0] | (q[1] << 8)) == vc[k];
+        }
+        if (s > best) best = s;
+    }
+    return best;
+}
+
 static int ws_match(Ppu *ppu, int layer, const uint8_t *base, int stride, int rows, WsAnchor *a) {
     int w = stride / 2;
     int h = ppu->bgLayer[layer].hScroll & 0x3ff, mc0 = h >> 4;
@@ -165,12 +194,14 @@ static int ws_match(Ppu *ppu, int layer, const uint8_t *base, int stride, int ro
     uint16_t map = ppu->bgLayer[layer].tilemapAdr;
     enum { NR = 14 };
     int total = 17 * NR, best = -1, best_d = -1, best_rd = 0;
-    static uint16_t vcol[17][NR];
+    static uint16_t vcol[17][NR], vrow[NR][17];
     int lrow[NR];                                    /* unwrapped screen-row index of each sample */
+    int mcj[NR], pg[NR];
+    ws_rows(ppu, layer, mc0, mcj, pg);
     for (int j = 0; j < NR; j++) lrow[j] = (1 + 16 * j + v) >> 4;
     for (int k = 0; k < 17; k++)
         for (int j = 0; j < NR; j++)
-            vcol[k][j] = ppu->vram[(map + (lrow[j] & 31) * 32 + ((mc0 + k) & 31)) & 0x7fff];
+            vrow[j][k] = vcol[k][j] = ppu->vram[(map + (lrow[j] & 31) * 32 + ((mcj[j] + k) & 31)) & 0x7fff];
     /* an (almost) uniform window matches anything; only anchor on real structure */
     {
         uint16_t seen[8]; int nseen = 0, odd = 0;
@@ -192,13 +223,8 @@ static int ws_match(Ppu *ppu, int layer, const uint8_t *base, int stride, int ro
         if (!ok_rows) continue;
         for (int d = 0; d < w; d++) {
             int score = 0;
-            for (int k = 0; k < 17; k++) {
-                const uint8_t *col = base + ((mc0 + k + d) % w) * 2;
-                for (int j = 0; j < NR; j++) {
-                    const uint8_t *p = col + (lrow[j] + rd) * stride;
-                    score += (uint16_t)(p[0] | (p[1] << 8)) == vcol[k][j];
-                }
-            }
+            for (int j = 0; j < NR; j++)
+                score += ws_row_score(base, stride, w, lrow[j] + rd, mcj[j] + d, pg[j], mcj[j] != mc0, vrow[j]);
             if (d == a->delta && rd == a->rdelta) score += 1;   /* prefer last frame's anchor on ties */
             if (score > best) { best = score; best_d = d; best_rd = rd; }
         }
@@ -214,16 +240,15 @@ static int ws_match(Ppu *ppu, int layer, const uint8_t *base, int stride, int ro
 static int ws_verify(Ppu *ppu, int layer, const uint8_t *base, int stride, int rows, int d, int rd) {
     int w = stride / 2, h = ppu->bgLayer[layer].hScroll & 0x3ff, v = ppu->bgLayer[layer].vScroll & 0x3ff;
     uint16_t map = ppu->bgLayer[layer].tilemapAdr;
-    int ok = 0, n = 0;
+    int ok = 0, n = 0, mcj[14], pg[14];
+    ws_rows(ppu, layer, h >> 4, mcj, pg);
     for (int j = 0; j < 14; j++) {
         int lr = (1 + 16 * j + v) >> 4, r = lr + rd;
         if (r < 0 || r >= rows) return 0;
-        for (int k = 0; k < 17; k++) {
-            int mc = (h >> 4) + k;
-            const uint8_t *p = base + r * stride + ((mc + d) % w) * 2;
-            ok += (uint16_t)(p[0] | (p[1] << 8)) == ppu->vram[(map + (lr & 31) * 32 + (mc & 31)) & 0x7fff];
-            n++;
-        }
+        uint16_t vc[17];
+        for (int k = 0; k < 17; k++) vc[k] = ppu->vram[(map + (lr & 31) * 32 + ((mcj[j] + k) & 31)) & 0x7fff];
+        ok += ws_row_score(base, stride, w, r, mcj[j] + d, pg[j], mcj[j] != (h >> 4), vc);
+        n += 17;
     }
     return ok * 1000 / n;
 }
@@ -232,8 +257,9 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
     Snes *s = (Snes *)user;
     static const struct { int bank_off, stride_var; } L[2] = {{0x0000, 0x84}, {0x10000, 0x9A}};
     ppu->wsBgMask = 0;
+    ppu->wsCamLine = 1;
     for (int l = 0; l < 2; l++) {
-        ppu->wsSrc[l].valid = false;
+        ppu->wsSrc[l].valid = false; ppu->wsSrc[l].refCol = -1;
         /* A back layer that scrolls independently (parallax, often with a different scroll per
          * band of lines) never streams its tiles: its hardware map already repeats correctly,
          * so it extends straight from VRAM with each line's own scroll. */
@@ -293,6 +319,32 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
         const uint8_t *base = s->ram + L[l].bank_off + 0xC100;
         WsAnchor *a = &g_anchor[l];
         int d = ws_match(ppu, l, base, stride, rows, a);
+        if (getenv("POPN_WS_DEBUG") && atoi(getenv("POPN_WS_DEBUG")) == 5 && l == 0) {   /* debug: whole map rows */
+            for (int r = 4; r < 12; r++) {
+                fprintf(stderr, "row %d vram:", r);
+                for (int c = 0; c < 32; c++) fprintf(stderr, " %04x", ppu->vram[(ppu->bgLayer[0].tilemapAdr + r * 32 + c) & 0x7fff]);
+                fprintf(stderr, "\nrow %d ring:", r);
+                for (int c = 0; c < stride / 2; c++) { const uint8_t *p = base + r * stride + c * 2; fprintf(stderr, " %04x", p[0] | (p[1] << 8)); }
+                fprintf(stderr, "\n");
+            }
+        }
+        if (getenv("POPN_WS_DEBUG") && atoi(getenv("POPN_WS_DEBUG")) == 4) {   /* debug: bands of line scroll (last frame) */
+            fprintf(stderr, "BG%d bands:", l + 1);
+            for (int ln = 1; ln < 225; ln++)
+                if (ln == 1 || ppu->wsLineH[l][ln] != ppu->wsLineH[l][ln - 1]) fprintf(stderr, " %d:%d", ln, ppu->wsLineH[l][ln]);
+            fprintf(stderr, "\n");
+        }
+        if (getenv("POPN_WS_DEBUG") && atoi(getenv("POPN_WS_DEBUG")) == 3 && d >= 0) {   /* debug: tilemap vs level map, a few rows */
+            int hh = ppu->bgLayer[l].hScroll & 0x3ff, vv = ppu->bgLayer[l].vScroll & 0x3ff;
+            for (int y = 40; y < 200; y += 32) {
+                int lr = (y + vv) >> 4, mc0 = hh >> 4;
+                fprintf(stderr, "BG%d y%3d vram:", l + 1, y);
+                for (int k = -6; k < 26; k++) fprintf(stderr, " %04x", ppu->vram[(ppu->bgLayer[l].tilemapAdr + (lr & 31) * 32 + ((mc0 + k) & 31)) & 0x7fff]);
+                fprintf(stderr, "\nBG%d y%3d ring:", l + 1, y);
+                for (int k = -6; k < 26; k++) { const uint8_t *p = base + (lr + a->rdelta) * stride + (((mc0 + k + d) % (stride / 2) + stride / 2) % (stride / 2)) * 2; fprintf(stderr, " %04x", p[0] | (p[1] << 8)); }
+                fprintf(stderr, "\n");
+            }
+        }
         if (d < 0 && g_dbg_best == -1 && a->delta >= 0 && a->stride == stride &&
             ws_verify(ppu, l, base, stride, rows, a->delta, a->rdelta) >= 920) {
             d = a->delta; a->locked = 1;                          /* featureless view: keep last anchor */
@@ -354,27 +406,36 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
             /* Doors and similar objects are written into the tilemap only, never into the level
              * map the extension is drawn from. Remember what the tilemap shows wherever it
              * differs from the level map, for as long as that spot of the level map itself
-             * stays the same, so such things stay drawn after they scroll into the wide area. */
+             * stays the same, so such things stay drawn after they scroll into the wide area.
+             * Only tiles well inside the 4:3 view count, and only once they have stayed the same
+             * for a few frames: the columns at its edges are briefly stale while the game streams
+             * them in (most of all when the screen shakes), and taking those would leave a stale
+             * or blank column in the wide area. */
             {
+                enum { OV_FRAMES = 4 };
                 static uint8_t ov_on[2][0x1F80]; static uint16_t ov_tile[2][0x1F80], ov_base[2][0x1F80];
                 static int ov_stride[2];
                 int ww = stride / 2, cells = bytes / 2;
                 if (ov_stride[l] != stride) { memset(ov_on[l], 0, sizeof ov_on[l]); ov_stride[l] = stride; }
                 int hs = ppu->bgLayer[l].hScroll & 0x3ff, vs = ppu->bgLayer[l].vScroll & 0x3ff;
                 uint16_t mp = ppu->bgLayer[l].tilemapAdr;
+                int mcj[14], pgj[14];
+                ws_rows(ppu, l, hs >> 4, mcj, pgj);
                 for (int j = 0; j < 14; j++) {
                     int lr = (1 + 16 * j + vs) >> 4, r = lr + a->rdelta;
                     if (r < 0 || r >= rows) continue;
-                    for (int k = 0; k < 17; k++) {
+                    if (mcj[j] != (hs >> 4)) continue;   /* a band scrolled elsewhere: its tiles aren't at these columns */
+                    for (int k = 2; k < 15; k++) {
                         int mc = (hs >> 4) + k, idx = r * ww + (mc + d) % ww;
                         uint16_t vt = ppu->vram[(mp + (lr & 31) * 32 + (mc & 31)) & 0x7fff];
                         uint16_t bt = (uint16_t)(base[idx * 2] | (base[idx * 2 + 1] << 8));
-                        if (vt != bt) { ov_on[l][idx] = 1; ov_tile[l][idx] = vt; ov_base[l][idx] = bt; }
-                        else ov_on[l][idx] = 0;
+                        if (vt == bt) ov_on[l][idx] = 0;
+                        else if (ov_on[l][idx] && ov_tile[l][idx] == vt && ov_base[l][idx] == bt) { if (ov_on[l][idx] < 255) ov_on[l][idx]++; }
+                        else { ov_on[l][idx] = 1; ov_tile[l][idx] = vt; ov_base[l][idx] = bt; }
                     }
                 }
                 for (int i = 0; i < cells; i++) {
-                    if (!ov_on[l][i]) continue;
+                    if (ov_on[l][i] < OV_FRAMES) continue;
                     if ((uint16_t)(base[i * 2] | (base[i * 2 + 1] << 8)) != ov_base[l][i]) { ov_on[l][i] = 0; continue; }
                     stable[l][i * 2] = (uint8_t)ov_tile[l][i]; stable[l][i * 2 + 1] = (uint8_t)(ov_tile[l][i] >> 8);
                 }
@@ -382,6 +443,7 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
             ppu->wsSrc[l].valid = true; ppu->wsSrc[l].base = stable[l]; ppu->wsSrc[l].stride = stride;
         }
         ppu->wsSrc[l].width = stride / 2; ppu->wsSrc[l].rows = rows; ppu->wsSrc[l].delta = d; ppu->wsSrc[l].rdelta = a->rdelta;
+        ppu->wsSrc[l].refCol = (ppu->bgLayer[l].hScroll & 0x3ff) >> 4;
         ppu->wsSrc[l].clamp = false; ppu->wsSrc[l].vring = false;
         if (l == 1 && narrow && !(ppu->wsSrc[0].valid && ppu->wsSrc[0].clamp)) { ppu->wsSrc[l].valid = false; continue; }
         /* A back layer that scrolls together with the playfield shares its bounds: beyond them
@@ -398,17 +460,32 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
              * right of its last. $62 holds the camera X (+0x180) in full; reconcile it with the
              * 10-bit scroll register actually used for this frame and clamp to the map. */
             int cam = (s->ram[0x62] | (s->ram[0x63] << 8)) - 0x180;
-            int k = (cam - h + 512) >> 10;
-            if (cam - h + 512 < 0) k = -((h - cam + 511) >> 10);
-            int cam_r = h + 1024 * k;
+            /* In a scene drawn in bands that scroll separately, only the band that moves with the
+             * camera says where the level is: find it (the line whose scroll last frame was
+             * nearest the camera; line 1 when the whole screen scrolls together) and estimate its
+             * scroll for this frame from line 1's. The edges are drawn from that line's scroll. */
+            int cam_line = 1, hc = h;
+            {
+                int cm = ((cam % 1024) + 1024) % 1024, bestd = 1 << 30;
+                for (int ln = 1; ln <= 224; ln++) {
+                    int dd = abs(((ppu->wsLineH[0][ln] - cm + 512) & 0x3ff) - 512);
+                    if (dd < bestd) { bestd = dd; cam_line = ln; }
+                }
+                hc = (h + ((ppu->wsLineH[0][cam_line] - ppu->wsLineH[0][1] + 512) & 0x3ff) - 512) & 0x3ff;
+            }
+            int k = (cam - hc + 512) >> 10;
+            if (cam - hc + 512 < 0) k = -((hc - cam + 511) >> 10);
+            int cam_r = hc + 1024 * k;
             int w_px = (stride / 2) * 16;
             if (cam_r - cam < 64 && cam - cam_r < 64 && cam > -64 && cam < w_px) {
                 ppu->wsSrc[l].clamp = true;
-                ppu->wsSrc[l].lxMin = h - cam_r;
-                ppu->wsSrc[l].lxMax = h - cam_r + w_px;
+                ppu->wsSrc[l].lxMin = hc - cam_r;
+                ppu->wsSrc[l].lxMax = hc - cam_r + w_px;
+                ppu->wsRefH = hc;
+                ppu->wsCamLine = cam_line;
             }
             if (getenv("POPN_WS_DEBUG") && atoi(getenv("POPN_WS_DEBUG")) == 2)
-                fprintf(stderr, "   cam %d cam_r %d h %d clamp %d lx [%d,%d)\n", cam, cam_r, h, ppu->wsSrc[l].clamp, ppu->wsSrc[l].lxMin, ppu->wsSrc[l].lxMax);
+                fprintf(stderr, "   cam %d cam_r %d h %d clamp %d lx [%d,%d) line %d\n", cam, cam_r, hc, ppu->wsSrc[l].clamp, ppu->wsSrc[l].lxMin, ppu->wsSrc[l].lxMax, cam_line);
             if (narrow && !ppu->wsSrc[l].clamp) { ppu->wsSrc[l].valid = false; continue; }
         }
     }
@@ -442,6 +519,7 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
     rt_ws_extra = ppu->wsBlank ? 0 : ppu->wsExtra;     /* applies to the sprites the game draws next */
     if (getenv("POPN_NO_SPRITE_WS")) rt_ws_extra = 0;
     ppu->wsDebugLayers = getenv("POPN_WS_LAYERS") != NULL;
+    { static int hide = -1; if (hide < 0) hide = getenv("POPN_HIDE_BG") ? atoi(getenv("POPN_HIDE_BG")) : 0; ppu->wsDebugHide = (uint8_t)hide; }
 }
 
 void hw_set_sprite_limit(int on) { g->ppu->noSpriteLimit = !on; }
@@ -706,7 +784,7 @@ static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, u
     void (*frame_hook)(Ppu *, void *) = p->wsFrameHook;
     void *user = p->wsUser;
     bool blank = p->wsBlank;
-    p->lineHook = NULL;
+    p->lineHook = NULL; p->wsNoRecord = true;
     p->wsFrameHook = ip_frame_hook;   /* keeps this frame's widescreen sources and blanking */
     p->wsUser = &blank;
     /* Sprites: each moves part of the way along its object's motion (ip_sprite_motion);
@@ -757,7 +835,7 @@ static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, u
     memcpy((uint8_t *)p + RG_START, regs, RG_SIZE);
     memcpy(p->cgram, cgram, sizeof cgram);
     memcpy(p->oam, oam, sizeof oam); memcpy(p->highOam, high, sizeof high);
-    p->lineHook = line_hook; p->wsFrameHook = frame_hook; p->wsUser = user; p->wsBlank = blank;
+    p->lineHook = line_hook; p->wsFrameHook = frame_hook; p->wsUser = user; p->wsBlank = blank; p->wsNoRecord = false;
     return w;
 }
 
