@@ -35,7 +35,6 @@ These are tracked on the [Issues](https://github.com/looking-glassinsects/Magica
 | [2](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/2) | Boomerangs get stuck on the screen | 16:9 |
 | [3](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/3) | Some rooms show broken graphics in the 16:9 side columns | 16:9 |
 | [4](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/4) | Throne room before the final boss is broken in 16:9 | 16:9 |
-| [5](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/5) | Black bars at the sides when the screen shakes | 16:9 |
 | [6](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/6) | Side columns change while going through the tubes | 16:9 |
 | [7](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/7) | Mace ghosts and clones its sprite | Motion smoothing |
 | [8](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/8) | Sprite flickers on the spring in the first area | Graphics |
