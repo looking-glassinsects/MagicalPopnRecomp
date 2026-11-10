@@ -19,6 +19,22 @@ Levels are rendered wider rather than stretched, so the pixels keep their shape 
 
 16:9 mode is still undergoing active testing and there might be a few visual glitches. 4:3 is the best experience for now, but 16:9 is almost perfect.
 
+## Known issues
+
+These are tracked on the [Issues](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues) tab, where you can add details or screenshots.
+
+- [Boss head only bounces inside the 4:3 area in 16:9](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/1)
+- [Boomerangs get stuck on the screen](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/2)
+- [Some rooms show broken graphics in the 16:9 side columns](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/3)
+- [Throne room before the final boss is broken in 16:9](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/4)
+- [Black bars at the sides when the screen shakes](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/5)
+- [Side columns change while going through the tubes](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/6)
+- [Mace ghosts and clones its sprite](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/7)
+- [Sprite flickers on the spring in the first area](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/8)
+- [Bottom of open doors shimmers when walking past](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/9)
+- [Frame drops in some rooms and when lots is on screen](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/10)
+- [Fixes in v0.9.2 that still need testing](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/11)
+
 ## Quick start
 
 1. Download **`MagicalPopn-Builder.zip`** from the [latest release](https://github.com/looking-glassinsects/MagicalPopnRecomp/releases/latest) and extract it anywhere.
