@@ -253,6 +253,72 @@ static int ws_verify(Ppu *ppu, int layer, const uint8_t *base, int stride, int r
     return ok * 1000 / n;
 }
 
+/* The back layer (BG2) extended straight from its hardware tilemap, with each line's own scroll.
+ * The game refreshes that map piece by piece, briefly leaving holes in parts that are off-screen
+ * in 4:3, so this uses a copy where a tile is taken over only after it has held the same value
+ * for two frames. */
+/* lvl (optional): the layer's level map (stride 64 = 32 columns, `rows` rows, anchor d/rd); a
+ * tilemap word the game hasn't written since the last load (room set-up) is still the previous
+ * room's, so the level map's tile for that spot is used instead */
+static const uint8_t *ws_vram_copy_lvl(Ppu *ppu, int l, const uint8_t *lvl, int rows, int d, int rd) {
+    static uint8_t vprev[2][0x800], vstable[2][0x800];
+    static int vmap[2] = {-1, -1};
+    uint16_t map = ppu->bgLayer[l].tilemapAdr;
+    uint8_t cur[0x800];
+    int top = ((ppu->bgLayer[l].vScroll & 0x3ff) >> 4) - 4;
+    for (int i = 0; i < 0x400; i++) {
+        uint16_t w = ppu->vram[(map + i) & 0x7fff];
+        int trusted = (ppu->wsVramEpoch[(map + i) & 0x7fff] & 0x7fff) == ppu->wsEpoch;
+        uint16_t lw = 0xFFFF;
+        if (lvl) {
+            int r = i >> 5, c = i & 31;
+            int lr = top + ((r - top) & 31), R = lr + rd;
+            if (R >= 0 && R < rows) { const uint8_t *p = lvl + R * 64 + (((c + d) & 31) * 2); lw = (uint16_t)(p[0] | (p[1] << 8)); }
+        }
+        if (lvl && !trusted && lw != 0xFFFF) w = lw;
+        static int mdbg = -1; if (mdbg < 0) mdbg = getenv("POPN_MERGE_DEBUG") ? atoi(getenv("POPN_MERGE_DEBUG")) : 0;
+        if (lvl && mdbg && (i >> 5) == ((top + mdbg) & 31))
+            fprintf(stderr, "merge f%u L%d c%d trusted %d load %d vram %04x level %04x used %04x\n", hw_frame_count(), l, i & 31, trusted,
+                    (ppu->wsVramEpoch[(map + i) & 0x7fff] >> 15) & 1, ppu->vram[(map + i) & 0x7fff], lw, w);
+        cur[i * 2] = (uint8_t)w; cur[i * 2 + 1] = (uint8_t)(w >> 8);
+    }
+    if (vmap[l] != map) { memcpy(vprev[l], cur, sizeof cur); memcpy(vstable[l], cur, sizeof cur); vmap[l] = map; }
+    else for (int i = 0; i < 0x800; i += 2) {
+        if (cur[i] == vprev[l][i] && cur[i + 1] == vprev[l][i + 1]) { vstable[l][i] = cur[i]; vstable[l][i + 1] = cur[i + 1]; }
+        else { vprev[l][i] = cur[i]; vprev[l][i + 1] = cur[i + 1]; }
+    }
+    return vstable[l];
+}
+static const uint8_t *ws_vram_copy(Ppu *ppu, int l) { return ws_vram_copy_lvl(ppu, l, NULL, 0, 0, 0); }
+/* the room's set-up wrote (nearly) the layer's whole tilemap: a room drawn once and never
+ * streamed (the throne room), so its tilemap is the picture. Rooms that stream set up only the
+ * part on screen and keep filler elsewhere in the tilemap. */
+static int ws_tilemap_complete(Ppu *ppu, int l) {
+    uint16_t map = ppu->bgLayer[l].tilemapAdr; int n = 0;
+    for (int i = 0; i < 0x400; i++) n += ppu->wsVramEpoch[(map + i) & 0x7fff] == (ppu->wsEpoch | 0x8000);
+    return n >= 1000;
+}
+/* point a layer's extension at its hardware tilemap (keeps its clamp settings); for a narrow
+ * room's BG1 the level map fills in what the game hasn't drawn since the room was set up */
+static void ws_src_vram_lvl(Ppu *ppu, int l, const uint8_t *lvl, int rows, int d, int rd) {
+    ppu->wsSrc[l].valid = true; ppu->wsSrc[l].base = ws_vram_copy_lvl(ppu, l, lvl, rows, d, rd); ppu->wsSrc[l].stride = 64;
+    ppu->wsSrc[l].width = 32; ppu->wsSrc[l].rows = 32; ppu->wsSrc[l].delta = 0; ppu->wsSrc[l].rdelta = 0;
+    ppu->wsSrc[l].vring = 1; ppu->wsSrc[l].refCol = -1;
+}
+static void ws_src_vram(Ppu *ppu, int l) {
+    const uint8_t *lvl = NULL; int rows = 0, d = 0, rd = 0;
+    if (l == 0 && ppu->wsSrc[0].valid && !ppu->wsSrc[0].vring && ppu->wsSrc[0].stride == 64) {
+        lvl = ppu->wsSrc[0].base; rows = ppu->wsSrc[0].rows; d = ppu->wsSrc[0].delta; rd = ppu->wsSrc[0].rdelta;
+    }
+    ppu->wsSrc[l].valid = true; ppu->wsSrc[l].base = ws_vram_copy_lvl(ppu, l, lvl, rows, d, rd); ppu->wsSrc[l].stride = 64;
+    ppu->wsSrc[l].width = 32; ppu->wsSrc[l].rows = 32; ppu->wsSrc[l].delta = 0; ppu->wsSrc[l].rdelta = 0;
+    ppu->wsSrc[l].vring = 1; ppu->wsSrc[l].refCol = -1;
+}
+static void ws_back_from_vram(Ppu *ppu) {
+    ws_src_vram(ppu, 1);
+    ppu->wsSrc[1].clamp = false;
+}
+
 static void popn_ws_hook(Ppu *ppu, void *user) {
     Snes *s = (Snes *)user;
     static const struct { int bank_off, stride_var; } L[2] = {{0x0000, 0x84}, {0x10000, 0x9A}};
@@ -276,25 +342,8 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
             }
         }
         if (l == 1 && !parallax_ring && (ppu->bgLayer[1].hScroll & 0x3ff) != (ppu->bgLayer[0].hScroll & 0x3ff)) {
-            /* ...but the game refreshes that map piece by piece, briefly leaving holes in parts
-             * that are off-screen in 4:3. Use a copy where a tile is taken over only after it
-             * has held the same value for two frames. */
-            static uint8_t vprev[0x800], vstable[0x800];
-            static int vmap = -1;
             if (!ppu->wsSrc[0].valid || !ppu->bgLayer[1].bigTiles || ppu->bgLayer[1].tilemapWider) continue;
-            uint16_t map = ppu->bgLayer[1].tilemapAdr;
-            uint8_t cur[0x800];
-            for (int i = 0; i < 0x400; i++) {
-                uint16_t w = ppu->vram[(map + i) & 0x7fff];
-                cur[i * 2] = (uint8_t)w; cur[i * 2 + 1] = (uint8_t)(w >> 8);
-            }
-            if (vmap != map) { memcpy(vprev, cur, sizeof cur); memcpy(vstable, cur, sizeof cur); vmap = map; }
-            else for (int i = 0; i < 0x800; i += 2) {
-                if (cur[i] == vprev[i] && cur[i + 1] == vprev[i + 1]) { vstable[i] = cur[i]; vstable[i + 1] = cur[i + 1]; }
-                else { vprev[i] = cur[i]; vprev[i + 1] = cur[i + 1]; }
-            }
-            ppu->wsSrc[1].valid = true; ppu->wsSrc[1].base = vstable; ppu->wsSrc[1].stride = 64;
-            ppu->wsSrc[1].width = 32; ppu->wsSrc[1].rows = 32; ppu->wsSrc[1].delta = 0; ppu->wsSrc[1].rdelta = 0; ppu->wsSrc[1].vring = 1; ppu->wsSrc[1].clamp = false;
+            ws_back_from_vram(ppu);
             continue;
         }
         int stride = s->ram[L[l].stride_var] | (s->ram[L[l].stride_var + 1] << 8);
@@ -315,6 +364,26 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
         /* gameplay screens show the status bar on BG3 with a -4 horizontal offset; story
          * scenes don't, so a narrow map without it is a cutscene */
         if (narrow && (ppu->bgLayer[2].hScroll & 0x3ff) != 0x3FC) continue;
+        /* Narrow rooms (no wider than the 32-column hardware tilemap) can differ from their level
+         * map. One that the game set up whole and never streams (the throne room) is drawn from
+         * its tilemap (BG1 below, BG2 here). In the others, BG2 is drawn from its tilemap when its
+         * level map doesn't match it (castle rooms that draw the back wall into the tilemap only);
+         * otherwise both use the level map like any other room, since a streaming room's
+         * off-screen tilemap entries can be left over from rows or columns the view has passed. */
+        WsAnchor probe = g_anchor[1];
+        if (narrow && l == 1 && ppu->wsSrc[0].valid && ppu->wsSrc[0].clamp &&
+            (ppu->bgLayer[1].hScroll & 0x3ff) == (ppu->bgLayer[0].hScroll & 0x3ff) &&
+            (ppu->wsSrc[0].vring || stride != 64 || ws_match(ppu, 1, s->ram + 0x10000 + 0xC100, 64, 0x3F00 / 64, &probe) < 0)) {
+            /* entries not drawn since the room was set up come from BG2's level map, placed like
+             * BG1's (same layout when both scroll together) */
+            const uint8_t *lvl2 = s->ram + 0x10000 + 0xC100;
+            if (stride == 64 && (ppu->bgLayer[1].vScroll & 0x3ff) == (ppu->bgLayer[0].vScroll & 0x3ff))
+                ws_src_vram_lvl(ppu, 1, lvl2, 0x3F00 / 64, g_anchor[0].delta, g_anchor[0].rdelta);
+            else
+                ws_src_vram(ppu, 1);
+            ppu->wsSrc[1].clamp = true; ppu->wsSrc[1].lxMin = ppu->wsSrc[0].lxMin; ppu->wsSrc[1].lxMax = ppu->wsSrc[0].lxMax;
+            continue;
+        }
         int rows = 0x3F00 / stride;                 /* level height held in WRAM ($C100-$FFFF) */
         const uint8_t *base = s->ram + L[l].bank_off + 0xC100;
         WsAnchor *a = &g_anchor[l];
@@ -382,6 +451,20 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
                     s->frames, l + 1, stride, rows, ppu->bgLayer[l].hScroll, ppu->bgLayer[l].vScroll, d,
                     g_dbg_best, g_dbg_total, g_dbg_nseen, g_dbg_odd, ppu->bgLayer[l].tilemapAdr);
         if (d < 0 || stride != a->stride) { a->first_h = -1; a->scrolled = 0; a->stride = stride; }
+        /* a back layer whose visible part is one or two tiles repeated (a plain wall) can't be
+         * anchored in the level map, and needn't be: its hardware tilemap repeats it already */
+        if (d < 0 && l == 1 && g_dbg_best == -1 && g_dbg_nseen <= 2 && ppu->wsSrc[0].valid) {
+            /* (entries the game hasn't drawn since the room was set up are the previous room's:
+             * those come from BG2's level map, placed like BG1's, when the layout allows) */
+            if (stride == 64 && (ppu->bgLayer[1].vScroll & 0x3ff) == (ppu->bgLayer[0].vScroll & 0x3ff) &&
+                (ppu->bgLayer[1].hScroll & 0x3ff) == (ppu->bgLayer[0].hScroll & 0x3ff) && g_anchor[0].delta >= 0) {
+                ws_src_vram_lvl(ppu, 1, base, rows, g_anchor[0].delta, g_anchor[0].rdelta);
+                ppu->wsSrc[1].clamp = ppu->wsSrc[0].clamp;
+                ppu->wsSrc[1].lxMin = ppu->wsSrc[0].lxMin; ppu->wsSrc[1].lxMax = ppu->wsSrc[0].lxMax;
+            } else
+                ws_back_from_vram(ppu);
+            continue;
+        }
         if (d < 0) continue;
         int h = ppu->bgLayer[l].hScroll & 0x3ff;
         if (a->first_h < 0) a->first_h = h;
@@ -464,14 +547,33 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
              * camera says where the level is: find it (the line whose scroll last frame was
              * nearest the camera; line 1 when the whole screen scrolls together) and estimate its
              * scroll for this frame from line 1's. The edges are drawn from that line's scroll. */
+            /* The line is taken from the middle of that band (its first line sits on the border
+             * with the band above, which moves as the view scrolls up or down), and in a banded
+             * scene the band's scroll is last frame's plus the camera's move since then: line 1
+             * may have changed band since last frame, so this frame's line 1 says nothing. */
             int cam_line = 1, hc = h;
             {
-                int cm = ((cam % 1024) + 1024) % 1024, bestd = 1 << 30;
+                static int prev_cam = -100000;
+                int cm = ((cam % 1024) + 1024) % 1024, bestd = 1 << 30, banded = 0;
                 for (int ln = 1; ln <= 224; ln++) {
                     int dd = abs(((ppu->wsLineH[0][ln] - cm + 512) & 0x3ff) - 512);
-                    if (dd < bestd) { bestd = dd; cam_line = ln; }
+                    if (dd < bestd) bestd = dd;
+                    if (ppu->wsLineH[0][ln] != ppu->wsLineH[0][1]) banded = 1;
                 }
-                hc = (h + ((ppu->wsLineH[0][cam_line] - ppu->wsLineH[0][1] + 512) & 0x3ff) - 512) & 0x3ff;
+                int start = -1, best_run = 0;              /* longest run of such lines, same scroll */
+                for (int ln = 1; ln <= 225; ln++) {
+                    int in = ln <= 224 && abs(((ppu->wsLineH[0][ln] - cm + 512) & 0x3ff) - 512) == bestd;
+                    if (start >= 0 && (!in || ppu->wsLineH[0][ln] != ppu->wsLineH[0][start])) {
+                        if (ln - start > best_run) { best_run = ln - start; cam_line = start + (ln - start) / 2; }
+                        start = -1;
+                    }
+                    if (in && start < 0) start = ln;
+                }
+                if (banded && prev_cam > -100000 && abs(cam - prev_cam) < 64)
+                    hc = (ppu->wsLineH[0][cam_line] + (cam - prev_cam)) & 0x3ff;
+                else
+                    hc = (h + ((ppu->wsLineH[0][cam_line] - ppu->wsLineH[0][1] + 512) & 0x3ff) - 512) & 0x3ff;
+                prev_cam = cam;
             }
             int k = (cam - hc + 512) >> 10;
             if (cam - hc + 512 < 0) k = -((hc - cam + 511) >> 10);
@@ -485,8 +587,9 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
                 ppu->wsCamLine = cam_line;
             }
             if (getenv("POPN_WS_DEBUG") && atoi(getenv("POPN_WS_DEBUG")) == 2)
-                fprintf(stderr, "   cam %d cam_r %d h %d clamp %d lx [%d,%d) line %d\n", cam, cam_r, hc, ppu->wsSrc[l].clamp, ppu->wsSrc[l].lxMin, ppu->wsSrc[l].lxMax, cam_line);
+                fprintf(stderr, "   cam %d cam_r %d h %d clamp %d lx [%d,%d) line %d load %d\n", cam, cam_r, hc, ppu->wsSrc[l].clamp, ppu->wsSrc[l].lxMin, ppu->wsSrc[l].lxMax, cam_line, ppu->wsEpoch);
             if (narrow && !ppu->wsSrc[l].clamp) { ppu->wsSrc[l].valid = false; continue; }
+            if (narrow && ws_tilemap_complete(ppu, 0)) ws_src_vram(ppu, 0);
         }
     }
     /* The final boss's arena (stage 195) is a backdrop that repeats by design and has no level
@@ -542,6 +645,10 @@ void hw_set_widescreen(int extra, int profile) {
     }
 }
 int hw_get_pixels_wide(uint8_t *px) { return ppu_putPixelsWide(g->ppu, px); }
+const uint16_t *hw_line_hscroll(int layer) { return g->ppu->wsLineH[layer & 1]; }
+int hw_bg_vscroll(int layer) { return g->ppu->bgLayer[layer & 3].vScroll & 0x3ff; }
+const uint16_t *hw_line_vscroll(int layer) { return g->ppu->wsLineV[layer & 1]; }
+const uint32_t *hw_ws_stats(void) { g->ppu->wsStats = true; return g->ppu->wsStatObj; }
 void hw_get_samples(int16_t *s, int n) { snes_setSamples(g, s, n); }
 
 /* New native-rate (~32 kHz) stereo samples produced since the last call. */

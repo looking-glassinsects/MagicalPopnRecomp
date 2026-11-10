@@ -177,6 +177,201 @@ static uint16_t bot_input(uint32_t f) {
     return g_hold;
 }
 
+/* ---- test: POPN_SWEEP (with POPN_TOUR) walks the player through the whole room, lane by lane
+ * (up to the top, left to the edge, then right/left lanes going down), by setting her position
+ * every frame, and measures the wide picture on the way. Prints one SWEEP line at the end. */
+static struct {
+    int on, phase, dir, px, py, stable, moved, inphase, desc, lanes, last_cx, last_cy, done, stage, area, hp, rescues, mode;
+    int cxmin, cxmax, cymin, cymax, pbl, pbr, pcx, valid;
+    int bk[3], ck[3]; unsigned flashes, cflashes, barjumps, first_flash, first_jump, first_cflash;
+    double seam[2], ref[2]; unsigned seamn[2];
+    unsigned long long tr_cmp, tr_bad, tr_ctrl; unsigned tr_frames, tr_first;
+    LARGE_INTEGER t0; double tsum, tmax; unsigned tn, tslow;
+} g_sw;
+static uint8_t g_sw_px[HW_WIDE_MAX_W * 224 * 4];
+static inline int sw_w16(const uint8_t *w, int a) { return w[a] | w[a + 1] << 8; }
+static inline void sw_s16(uint8_t *w, int a, int v) { w[a] = (uint8_t)v; w[a + 1] = (uint8_t)(v >> 8); }
+static inline int sw_dark(const uint8_t *p) { return p[0] < 8 && p[1] < 8 && p[2] < 8; }
+static inline int sw_diff(const uint8_t *a, const uint8_t *b) { return abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) > 48; }
+
+static void sweep_frame(uint8_t *w, uint32_t f) {
+    const int SPD = 3;
+    if (!g_sw.on) {
+        g_sw.on = 1; g_sw.px = sw_w16(w, 0x4C0); g_sw.py = sw_w16(w, 0x4C2); g_sw.phase = 0; g_sw.hp = w[0x51A];
+        g_sw.stage = w[0x480]; g_sw.area = w[0x482]; g_sw.mode = w[0x484];
+        g_sw.cxmin = g_sw.cymin = 1 << 30; g_sw.cxmax = g_sw.cymax = -(1 << 30);
+        g_sw.last_cx = sw_w16(w, 0x62); g_sw.last_cy = sw_w16(w, 0x64);
+        hw_ws_stats(); QueryPerformanceCounter(&g_sw.t0);
+        return;
+    }
+    {   /* host time per emulated frame */
+        LARGE_INTEGER t1, fq; QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&fq);
+        double ms = (double)(t1.QuadPart - g_sw.t0.QuadPart) * 1000.0 / (double)fq.QuadPart; g_sw.t0 = t1;
+        g_sw.tsum += ms; g_sw.tn++; if (ms > g_sw.tmax) g_sw.tmax = ms; g_sw.tslow += ms > 8.0;
+    }
+    if (g_sw.done) return;
+    if (w[0x480] != g_sw.stage || w[0x482] != g_sw.area) { g_sw.done = 2; return; }   /* left the room */
+    int cx = sw_w16(w, 0x62), cy = sw_w16(w, 0x64);
+    if (cx < g_sw.cxmin) g_sw.cxmin = cx; if (cx > g_sw.cxmax) g_sw.cxmax = cx;
+    if (cy < g_sw.cymin) g_sw.cymin = cy; if (cy > g_sw.cymax) g_sw.cymax = cy;
+    int horiz = g_sw.phase == 1 || g_sw.phase == 2 || g_sw.phase == 4;
+    int camc = horiz ? cx != g_sw.last_cx : cy != g_sw.last_cy;
+    g_sw.inphase++;
+    if (camc) { g_sw.moved = 1; g_sw.stable = 0; } else g_sw.stable++;
+    /* She walks the room with the game's own gravity and floors: first to its left end, then
+     * all the way to its right end, jumping now and then. Only her X is set (so walls don't stop
+     * her); a fall into a pit puts her back at the height she last stood at; health stays full.
+     * A lane ends when the camera has stopped following her and she nears that screen edge. */
+    int ob = sw_w16(w, 0x4C6), okob = ob >= 0x1000 && ob < 0x1F00;
+    int oy = okob ? sw_w16(w, ob + 8) : g_sw.py;
+    if (oy == g_sw.py) g_sw.desc++; else g_sw.desc = 0;             /* frames at the same height */
+    static int ground = -1; if (g_sw.desc >= 3 || ground < 0) ground = oy;
+    g_sw.py = oy;
+    if (w[0x51A] < g_sw.hp) w[0x51A] = (uint8_t)g_sw.hp; else g_sw.hp = w[0x51A];
+    int sx = g_sw.px - cx, sy = oy - cy, still = g_sw.stable >= 8, cap = g_sw.inphase > 6000, rescue = 0;
+    if (sy > 200 && cy == g_sw.last_cy) { rescue = 1; g_sw.py = ground; g_sw.rescues++; }    /* in a pit */
+    switch (g_sw.phase) {
+    case 0: g_sw.phase = 1; break;
+    case 1: g_sw.px -= SPD; if ((still && sx < 24) || cap) { g_sw.phase = 2; g_sw.dir = 1; } break;   /* to the left end */
+    case 2:                                                                                      /* to the right end */
+        g_sw.px += SPD;
+        if ((still && sx > 232) || cap) { g_sw.lanes++; g_sw.done = 1; }
+        break;
+    }
+    { static int dbg = -1; if (dbg < 0) dbg = getenv("POPN_SWEEP") && atoi(getenv("POPN_SWEEP")) == 2;
+      if (dbg && f % 20 == 0) fprintf(stderr, "sw f %u ph %d px %d py %d cx %d cy %d sx %d sy %d st %d\n", f, g_sw.phase, g_sw.px, g_sw.py, cx, cy, sx, sy, g_sw.stable); }
+    static int last_phase = -1;
+    if (g_sw.phase != last_phase) { last_phase = g_sw.phase; g_sw.inphase = 0; g_sw.moved = 0; g_sw.stable = 0; }
+    g_sw.last_cx = cx; g_sw.last_cy = cy;
+    {   /* the camera leads in the direction she faces, which follows the d-pad */
+        int d = g_sw.phase == 1 ? -1 : g_sw.phase == 2 ? 1 : 0;
+        uint16_t b = (uint16_t)(d > 0 ? 1 << BTN_RIGHT : d < 0 ? 1 << BTN_LEFT : 0);
+        if (g_sw.inphase % 64 >= 40 && g_sw.inphase % 64 < 56) b |= 1 << BTN_B;     /* jump */
+        hw_set_buttons(b);
+    }
+    {   /* the player object (its address is at $04C6): X at +4 (+6 fraction), Y at +8 (+10 fraction, +12/+14 Y speed) */
+        if (okob) {
+            sw_s16(w, ob + 4, g_sw.px); sw_s16(w, ob + 6, 0);
+            if (rescue) { sw_s16(w, ob + 8, g_sw.py); sw_s16(w, ob + 10, 0); sw_s16(w, ob + 12, 0); sw_s16(w, ob + 14, 0); }
+        }
+    }
+
+    /* ---- measure the picture */
+    int ww = hw_get_pixels_wide(g_sw_px);
+    if (ww <= 256) { g_sw.valid = 0; return; }
+    int es = (ww - 256) / 2;
+    const uint8_t *P = g_sw_px;
+    #define PX(x, y) (P + ((y) * ww + (x)) * 4)
+    int bl = 0, br = 0;                         /* level-edge bars: columns black all the way down */
+    for (; bl < es; bl++) { int all = 1; for (int y = 0; y < 224 && all; y += 3) all = sw_dark(PX(bl, y)); if (!all) break; }
+    for (; br < es; br++) { int all = 1; for (int y = 0; y < 224 && all; y += 3) all = sw_dark(PX(ww - 1 - br, y)); if (!all) break; }
+    int bk = 0, ck = 0;                         /* dark pixels in the side areas (outside bars) / in 4:3 */
+    for (int y = 32; y < 224; y += 2) {
+        for (int x = bl; x < es; x++) bk += sw_dark(PX(x, y));
+        for (int x = es + 256; x < ww - br; x++) bk += sw_dark(PX(x, y));
+        for (int x = es; x < es + 256; x += 2) ck += sw_dark(PX(x, y));
+    }
+    const char *info; int failed = hw_ws_failed(&info) != 0;
+    if (g_sw.valid) {
+        int dcx = cx - g_sw.pcx; if (dcx < 0) dcx = -dcx;
+        if ((abs(bl - g_sw.pbl) > dcx + 8 || abs(br - g_sw.pbr) > dcx + 8) && !failed) { if (!g_sw.barjumps) g_sw.first_jump = f; g_sw.barjumps++; }
+        int T = 400;
+        if (g_sw.bk[1] > g_sw.bk[0] + T && g_sw.bk[1] > bk + T) { if (!g_sw.flashes) g_sw.first_flash = f - 1; g_sw.flashes++; }
+        if (g_sw.ck[1] > g_sw.ck[0] + 1500 && g_sw.ck[1] > ck + 1500) { if (!g_sw.cflashes) g_sw.first_cflash = f - 1; g_sw.cflashes++; }
+    }
+    g_sw.bk[0] = g_sw.bk[1]; g_sw.bk[1] = bk; g_sw.ck[0] = g_sw.ck[1]; g_sw.ck[1] = ck;
+    g_sw.pbl = bl; g_sw.pbr = br; g_sw.pcx = cx; g_sw.valid = 1;
+    /* POPN_SWEEP_TRUTH=1 or 2 (run with only that BG layer shown, POPN_HIDE_BG): every side-area
+     * row is kept with the scroll its line had; when the 4:3 picture later shows the same spot
+     * (that line scrolled 71 px further, same vertical scroll) the two must agree. */
+    {
+        static int layer = -1; if (layer < 0) layer = getenv("POPN_SWEEP_TRUTH") ? atoi(getenv("POPN_SWEEP_TRUTH")) : 0;
+        enum { TN = 384, E = 71 };
+        typedef struct { int16_t h[224], v[224]; int used, f; uint8_t L[224][E][3], R[224][E][3], CL[224][E][3], CR[224][E][3]; } TrFrame;
+        static TrFrame *tr; static int trn;
+        if (layer >= 1 && layer <= 2 && es == E && !failed) {
+            if (!tr) tr = (TrFrame *)calloc(TN, sizeof(TrFrame));
+            const uint16_t *lh = hw_line_hscroll(layer - 1), *lv = hw_line_vscroll(layer - 1);
+            unsigned cmp = 0, bad = 0, ctrl = 0;
+            /* each match also compares a 71 px band of the 4:3 picture both frames show (control):
+             * when that differs too (lightning, palette or tile animation), it isn't the side area */
+            #define TRD(p, q) (abs((p)[2] - (q)[0]) + abs((p)[1] - (q)[1]) + abs((p)[0] - (q)[2]) > 30)
+            for (int y = 32; y < 224; y++) {
+                int h = lh[y + 1] & 0x3ff, v = lv[y + 1] & 0x3ff, doneR = 0, doneL = 0;
+                for (int i = 0; i < TN && !(doneR && doneL); i++) {
+                    const TrFrame *e = &tr[i];
+                    if (!e->used || e->v[y] != v || (int)f - e->f > 200) continue;   /* (the scroll wraps every 1024 px) */
+                    int eh = e->h[y];
+                    if (!doneR && eh == ((h - E) & 0x3ff)) {
+                        doneR = 1; unsigned b0 = bad, c0 = ctrl;
+                        for (int x = 0; x < E; x++) {
+                            cmp++; bad += TRD(PX(es + 256 - E + x, y), e->R[y][x]);
+                            ctrl += TRD(PX(es + 256 - 2 * E + x, y), e->CR[y][x]);
+                        }
+                        static int dbg = -1; if (dbg < 0) dbg = getenv("POPN_TRUTH_DEBUG") ? atoi(getenv("POPN_TRUTH_DEBUG")) : 0;
+                        if (dbg && (int)f == dbg && y % 16 == 0)
+                            fprintf(stderr, "truth R f%u y%d h%d v%d matched f%d bad %u ctrl %u\n", f, y, h, v, e->f, bad - b0, ctrl - c0);
+                    }
+                    if (!doneL && eh == ((h + E) & 0x3ff)) {
+                        doneL = 1; unsigned b0 = bad, c0 = ctrl;
+                        for (int x = 0; x < E; x++) {
+                            cmp++; bad += TRD(PX(es + x, y), e->L[y][x]);
+                            ctrl += TRD(PX(es + E + x, y), e->CL[y][x]);
+                        }
+                        static int dbg = -1; if (dbg < 0) dbg = getenv("POPN_TRUTH_DEBUG") ? atoi(getenv("POPN_TRUTH_DEBUG")) : 0;
+                        if (dbg && (int)f == dbg && y % 16 == 0)
+                            fprintf(stderr, "truth L f%u y%d h%d v%d matched f%d bad %u ctrl %u\n", f, y, h, v, e->f, bad - b0, ctrl - c0);
+                    }
+                }
+            }
+            #undef TRD
+            g_sw.tr_cmp += cmp; g_sw.tr_bad += bad; g_sw.tr_ctrl += ctrl;
+            { static int dbg = -1; if (dbg < 0) dbg = getenv("POPN_TRUTH_DEBUG") ? atoi(getenv("POPN_TRUTH_DEBUG")) : 0;
+              if (dbg && (int)f >= dbg && (int)f < dbg + 40) fprintf(stderr, "truth frame %u cmp %u bad %u ctrl %u\n", f, cmp, bad, ctrl); }
+            if (cmp >= 400 && bad * 5 > cmp && bad > 3 * ctrl + cmp / 20) {
+                if (!g_sw.tr_frames) g_sw.tr_first = f;
+                g_sw.tr_frames++;
+                if (getenv("POPN_TRUTH_LOG")) fprintf(stderr, "truth bad frame %u cmp %u bad %u ctrl %u\n", f, cmp, bad, ctrl);
+            }
+            TrFrame *e = &tr[trn]; trn = (trn + 1) % TN;
+            e->used = 1; e->f = (int)f;
+            for (int y = 0; y < 224; y++) {
+                e->h[y] = (int16_t)(lh[y + 1] & 0x3ff); e->v[y] = (int16_t)(lv[y + 1] & 0x3ff);
+                for (int x = 0; x < E; x++) {
+                    const uint8_t *p = PX(x, y), *q = PX(es + 256 + x, y), *c = PX(es + x, y), *d = PX(es + 256 - E + x, y);
+                    e->L[y][x][0] = p[2]; e->L[y][x][1] = p[1]; e->L[y][x][2] = p[0];
+                    e->R[y][x][0] = q[2]; e->R[y][x][1] = q[1]; e->R[y][x][2] = q[0];
+                    e->CL[y][x][0] = c[2]; e->CL[y][x][1] = c[1]; e->CL[y][x][2] = c[0];
+                    e->CR[y][x][0] = d[2]; e->CR[y][x][1] = d[1]; e->CR[y][x][2] = d[0];
+                }
+            }
+        }
+    }
+    /* seams: how often a pixel differs from its neighbour across each 4:3 edge, against the same
+     * measure 16/32/48 px inside the 4:3 picture (same tile phase) */
+    if (!failed) for (int side = 0; side < 2; side++) {
+        if (side == 0 ? bl >= es - 1 : br >= es - 1) continue;
+        int xs = side == 0 ? es : es + 256, s = 0, r = 0;
+        for (int y = 40; y < 224; y++) {
+            s += sw_diff(PX(xs - 1, y), PX(xs, y));
+            for (int k = 1; k <= 3; k++) { int xr = side == 0 ? xs + 16 * k : xs - 16 * k; r += sw_diff(PX(xr - 1, y), PX(xr, y)); }
+        }
+        g_sw.seam[side] += s; g_sw.ref[side] += r / 3.0; g_sw.seamn[side]++;
+    }
+    #undef PX
+}
+
+static void sweep_print(void) {
+    const uint32_t *o = hw_ws_stats();
+    printf("SWEEP %d %d done %d lanes %d rescue %d camx %d-%d camy %d-%d flash %u@%u cflash %u@%u barjump %u@%u "
+           "seamL %.2f seamR %.2f n %u %u obj %u %u %u %u ms %.2f max %.1f slow %u truth %llu %llu %u@%u ctrl %llu mode %d\n",
+           g_sw.stage, g_sw.area, g_sw.done, g_sw.lanes, g_sw.rescues, g_sw.cxmin, g_sw.cxmax, g_sw.cymin, g_sw.cymax,
+           g_sw.flashes, g_sw.first_flash, g_sw.cflashes, g_sw.first_cflash, g_sw.barjumps, g_sw.first_jump,
+           g_sw.seamn[0] ? (g_sw.seam[0] + 1) / (g_sw.ref[0] + 1) : 0.0, g_sw.seamn[1] ? (g_sw.seam[1] + 1) / (g_sw.ref[1] + 1) : 0.0,
+           g_sw.seamn[0], g_sw.seamn[1], o[0], o[1], o[2], o[3],
+           g_sw.tn ? g_sw.tsum / g_sw.tn : 0.0, g_sw.tmax, g_sw.tslow, g_sw.tr_cmp, g_sw.tr_bad, g_sw.tr_frames, g_sw.tr_first, g_sw.tr_ctrl, g_sw.mode);
+}
+
 static uint32_t g_state_test = 0;
 static const char *g_load_state_arg;   /* --load-state FILE: start from this state */   /* --state-test FRAME: save at FRAME, load at FRAME+180 */
 
@@ -185,7 +380,8 @@ static void on_vblank_headless(void) {
     {   /* debug: POPN_DUMP_WRAM=file -> per frame: BG1 hscroll (u16) + WRAM $0000-$1FFF */
         static FILE *df; static int init;
         if (!init) { const char *p = getenv("POPN_DUMP_WRAM"); if (p) df = fopen(p, "wb"); init = 1; }
-        if (df) { uint16_t h = hw_bg_hscroll(0); fwrite(&h, 2, 1, df); fwrite(hw_wram(), 1, 0x2000, df); }
+        static int size = -1; if (size < 0) size = getenv("POPN_DUMP_SIZE") ? (int)strtol(getenv("POPN_DUMP_SIZE"), NULL, 0) : 0x2000;
+        if (df) { uint16_t h = hw_bg_hscroll(0); fwrite(&h, 2, 1, df); fwrite(hw_wram(), 1, (size_t)size, df); }
     }
     int n = hw_take_samples(g_native, 4096);
     if (g_wav) { fwrite(g_native, 4, n, g_wav); g_wav_frames += n; }
@@ -200,10 +396,22 @@ static void on_vblank_headless(void) {
         if (at >= 0) {
             uint8_t *w = (uint8_t *)hw_wram();
             if ((int)g_frames_run == at) { w[0x480] = (uint8_t)chapter; w[0x481] = 0; w[0x482] = 1; w[0x483] = 0; w[0x486] = 1; w[0x487] = 0; }
-            if ((int)g_frames_run == at + 260) { w[0x480] = (uint8_t)stage; w[0x481] = 0; w[0x482] = (uint8_t)area; w[0x483] = 0; w[0x486] = 1; w[0x487] = 0; }
+            {   /* POPN_TOUR_STEPS=1: go through the stage's first area first (it loads the stage's graphics) */
+                static int steps = -1; if (steps < 0) steps = getenv("POPN_TOUR_STEPS") != NULL;
+                int t1 = at + 260, t2 = steps ? at + 520 : at + 260;
+                if (steps && (int)g_frames_run == t1) { w[0x480] = (uint8_t)stage; w[0x481] = 0; w[0x482] = 1; w[0x483] = 0; w[0x486] = 1; w[0x487] = 0; }
+                if ((int)g_frames_run == t2 && !(steps && area == 1)) { w[0x480] = (uint8_t)stage; w[0x481] = 0; w[0x482] = (uint8_t)area; w[0x483] = 0; w[0x486] = 1; w[0x487] = 0; }
+            }
             if ((int)g_frames_run > at) {
-                w[0x5C] = 1;                                   /* MUTEKI */
-                if ((int)g_frames_run > at + 460) {
+                if (getenv("POPN_TOUR_SLOW")) w[0x5C] = 1;     /* debug slow motion ($60 extra vblanks per frame) */
+                static int settle = -1; if (settle < 0) settle = getenv("POPN_TOUR_STEPS") ? 720 : 460;
+                if ((int)g_frames_run > at + settle) {
+                    static int sweep = -1, ending;
+                    if (sweep < 0) sweep = getenv("POPN_SWEEP") != NULL;
+                    if (sweep) {
+                        sweep_frame(w, g_frames_run);
+                        if (g_sw.done && !ending) { ending = 1; if (g_max_frames > g_frames_run + 3) g_max_frames = g_frames_run + 3; }
+                    }
                     const char *info;
                     frames++;
                     fail += hw_ws_failed(&info) != 0;
@@ -229,6 +437,7 @@ static void on_vblank_headless(void) {
                 printf("TOUR %d %d frames %u ws_fail %u black_sides %u spin_pc %06X lag %u rooms", stage, area, frames, fail, blacksides, top, all - tn);
                 for (int s = 0; s < 16; s++) for (int a = 0; a < 16; a++) if (rooms[s][a]) printf(" %d-%d:%u", s, a, rooms[s][a]);
                 printf("\n");
+                if (getenv("POPN_SWEEP")) sweep_print();
             }
         }
     }
@@ -580,10 +789,12 @@ static uint8_t *load_file(const char *path, size_t *size) {
 static void boot_cpu(void) {
     memset(&g_cpu, 0, sizeof g_cpu);
     g_cpu.e = 1; g_cpu.s = 0x01FF; g_cpu.p = P_M | P_X | P_I;
+    { extern Cpu *rt_dbg_cpu; rt_dbg_cpu = &g_cpu; }
 }
 
 int main(int argc, char **argv) {
     const char *rom_override = NULL, *wav_path = NULL;
+    { extern Cpu *rt_dbg_cpu; rt_dbg_cpu = &g_cpu; }
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--headless") && i + 1 < argc) { g_headless = 1; g_max_frames = (uint32_t)atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--shots") && i + 1 < argc) g_shot_dir = argv[++i];

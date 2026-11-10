@@ -157,7 +157,14 @@ struct Ppu {
   int wsCamLine;                // [widescreen] line whose scroll is the camera's (the level edges follow it)
   uint8_t wsDebugHide;         // [widescreen] debug: BG layers (bit n = BG n+1) not drawn at all
   bool wsNoRecord;             // [widescreen] set while drawing an in-between picture
+  uint16_t wsEpoch;            // [widescreen] current load (see wsVramEpoch)
+  bool wsInLoad;
+  int wsDbgMapWrites, wsDbgBright;
+  uint16_t wsVramEpoch[0x8000]; // [widescreen] load in which each VRAM word was last written
+  bool wsStats;                // [widescreen] test: count sprite pixels by the 4:3 edges (wsStatObj)
+  uint32_t wsStatObj[4];       // [widescreen] test: 16 px bands left-out, left-in, right-in, right-out
   uint16_t wsLineH[2][240];     // [widescreen] BG1/BG2 horizontal scroll of each line of the last frame
+  uint16_t wsLineV[2][240];     // [widescreen] ...and vertical scroll (tests)
   int wsPgY[4], wsPgH[4], wsPg[4]; // [widescreen] page found for the line being drawn (cache)
   uint8_t wsLineLayer[256 + 2 * PPU_WS_MAX]; // [widescreen] layer shown per dot on the current line   // debug: color extension pixels by the layer that produced them
   struct {

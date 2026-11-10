@@ -74,6 +74,18 @@ static bool ppu_getWindowState(Ppu* ppu, int layer, int x);
 static void ppu_evaluateSprites(Ppu* ppu, int line);
 static uint16_t ppu_getVramRemap(Ppu* ppu);
 
+// [widescreen] which load each VRAM word was last written in: writes during forced blank that
+// follow a displayed picture start a new load (a new room or screen being set up)
+static inline void ppu_wsStampVram(Ppu* ppu, uint16_t adr) {
+  if((ppu->forcedBlank || ppu->brightness == 0) && !ppu->wsInLoad) {
+    ppu->wsEpoch = (ppu->wsEpoch + 1) & 0x7fff; ppu->wsInLoad = true;
+    static int dbg = -1; if(dbg < 0) dbg = getenv("POPN_LOAD_DEBUG") != NULL;
+    if(dbg) fprintf(stderr, "vram load %d (forced blank %d, brightness %d) at %04x\n", ppu->wsEpoch, ppu->forcedBlank, ppu->brightness, adr);
+  }
+  ppu->wsVramEpoch[adr & 0x7fff] = ppu->wsEpoch | (ppu->wsInLoad ? 0x8000 : 0);   // bit 15: written while setting up
+  if(((adr - ppu->bgLayer[0].tilemapAdr) & 0x7fff) < 0x400) { ppu->wsDbgMapWrites++; ppu->wsDbgBright = ppu->brightness | (ppu->forcedBlank << 4); }
+}
+
 Ppu* ppu_init(Snes* snes) {
   Ppu* ppu = malloc(sizeof(Ppu));
   ppu->snes = snes;
@@ -197,6 +209,10 @@ void ppu_reset(Ppu* ppu) {
 }
 
 void ppu_handleState(Ppu* ppu, StateHandler* sh) {
+  // [widescreen] after a save or load, all of VRAM counts as written for the current room (but
+  // not as a complete set-up)
+  for(int i = 0; i < 0x8000; i++) ppu->wsVramEpoch[i] = ppu->wsEpoch & 0x7fff;
+  ppu->wsInLoad = false;
   sh_handleBools(sh,
     &ppu->vramIncrementOnHigh, &ppu->cgramSecondWrite, &ppu->oamInHigh, &ppu->oamInHighWritten, &ppu->oamSecondWrite,
     &ppu->objPriority, &ppu->timeOver, &ppu->rangeOver, &ppu->objInterlace, &ppu->m7largeField, &ppu->m7charFill,
@@ -289,7 +305,11 @@ void ppu_runLine(Ppu* ppu, int line) {
   if(ws < 0) ws = 0;
   if(ws > PPU_WS_MAX) ws = PPU_WS_MAX;
   if(ppu->mode == 5 || ppu->mode == 6) ws = 0; // hires modes: not extended
+  if(!ppu->forcedBlank && ppu->brightness > 0) ppu->wsInLoad = false;   // [widescreen] a picture is showing: any load is over
   if(line == 1) {
+    static int dbg = -1; if(dbg < 0) dbg = getenv("POPN_LOAD_DEBUG") != NULL;
+    if(dbg && ppu->wsDbgMapWrites) fprintf(stderr, "bg1 map writes %d (last at bright/fb %02x) load %d\n", ppu->wsDbgMapWrites, ppu->wsDbgBright, ppu->wsEpoch);
+    ppu->wsDbgMapWrites = 0;
     ppu->wsBlank = false;
     if(ws && ppu->wsFrameHook) ppu->wsFrameHook(ppu, ppu->wsUser);
     for(int l = 0; l < 4; l++) ppu->wsPgY[l] = -100000;
@@ -302,6 +322,8 @@ void ppu_runLine(Ppu* ppu, int line) {
   if(!ppu->wsNoRecord && line < 240) {
     ppu->wsLineH[0][line] = ppu->bgLayer[0].hScroll;
     ppu->wsLineH[1][line] = ppu->bgLayer[1].hScroll;
+    ppu->wsLineV[0][line] = ppu->bgLayer[0].vScroll;
+    ppu->wsLineV[1][line] = ppu->bgLayer[1].vScroll;
   }
   int row = (line - 1) + (ppu->evenFrame ? 0 : 239);
   // clear the whole wide line (the extension stays black when it isn't drawn)
@@ -309,6 +331,12 @@ void ppu_runLine(Ppu* ppu, int line) {
   if(ppu->wsBlank) ws = 0;
   for(int x = -ws; x < 256 + ws; x++) {
     ppu_handlePixel(ppu, x, line);
+  }
+  // [widescreen] test statistics: sprite pixels in 16 px bands either side of the 4:3 edges
+  if(ppu->wsStats && ws >= 16 && !ppu->wsNoRecord && !ppu->forcedBlank && line > 32) {
+    static const int b0[4] = {-16, 0, 240, 256};
+    for(int b = 0; b < 4; b++)
+      for(int x = b0[b]; x < b0[b] + 16; x++) ppu->wsStatObj[b] += ppu->wsLineLayer[x + PPU_WS_MAX] == 4;
   }
   // [widescreen] holes: the backdrop showing in the extra columns while it shows nowhere in the
   // original 256 columns of this line means a layer's off-screen tiles weren't there yet (the game
@@ -337,6 +365,8 @@ int ppu_putPixelsWide(Ppu* ppu, uint8_t* pixels) {
   int blackL = -ws, blackR = 256 + ws;
   if(ws && ppu->wsSrc[0].valid && ppu->wsSrc[0].clamp) {
     int edgeH = ppu->wsRefH + ((((ppu->wsEdgeScroll & 0x3ff) - ppu->wsRefH + 512) & 0x3ff) - 512);
+    // a scroll far from the expected one means the camera's line was in another band this time
+    if(edgeH - ppu->wsRefH > 48 || ppu->wsRefH - edgeH > 48) edgeH = ppu->wsRefH;
     blackL = ppu->wsSrc[0].lxMin - edgeH; if(blackL > 0) blackL = 0;
     blackR = ppu->wsSrc[0].lxMax - edgeH; if(blackR < 256) blackR = 256;
   }
@@ -455,7 +485,7 @@ static int ppu_getPixel(Ppu* ppu, int x, int y, bool sub, int* r, int* g, int* b
     }
     // [widescreen] layers not allowed to extend are transparent outside 0..255
     if(outside && curLayer < 4 && !(ppu->wsBgMask & (1 << curLayer)) && !ppu->wsSrc[curLayer].valid) layerActive = false;
-    if(curLayer < 4 && (ppu->wsDebugHide >> curLayer) & 1) layerActive = false;   // [widescreen] debug: layer hidden
+    if((ppu->wsDebugHide >> curLayer) & 1) layerActive = false;   // [widescreen] debug: layer hidden (bit 4 = sprites)
     if(layerActive) {
       if(curLayer < 4) {
         // bg layer
@@ -1106,12 +1136,14 @@ void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val) {
       // TODO: vram access during rendering (also cgram and oam)
       uint16_t vramAdr = ppu_getVramRemap(ppu);
       ppu->vram[vramAdr & 0x7fff] = (ppu->vram[vramAdr & 0x7fff] & 0xff00) | val;
+      ppu_wsStampVram(ppu, vramAdr);
       if(!ppu->vramIncrementOnHigh) ppu->vramPointer += ppu->vramIncrement;
       break;
     }
     case 0x19: {
       uint16_t vramAdr = ppu_getVramRemap(ppu);
       ppu->vram[vramAdr & 0x7fff] = (ppu->vram[vramAdr & 0x7fff] & 0x00ff) | (val << 8);
+      ppu_wsStampVram(ppu, vramAdr);
       if(ppu->vramIncrementOnHigh) ppu->vramPointer += ppu->vramIncrement;
       break;
     }

@@ -49,6 +49,31 @@ def find_overrides(rom_bytes):
         ov[at(11)] = f"cmp16(c, c->a, (uint16_t)(0x{lim:04X} + 2 * rt_ws_extra));"
         ov[at(20)] = f"setc(c, !(((uint16_t)(c->a - 0x{o:04X} - rt_ws_extra)) & 0x100));"
         ov[at(tail - mt.start() + 2)] = f"sbc16(c, (uint16_t)(0x{o:04X} + rt_ws_extra));"
+    # Object visibility checks with a narrow window (objX + O - camera in [0, L), e.g. doors,
+    # which are only shown from 32 px left of the 4:3 screen to its right edge). With
+    # widescreen each margin is raised to at least rt_ws_extra so the object shows in the extra
+    # columns; wider windows (the usual enemy range) and E == 0 are unchanged.
+    pat = re.compile(bytes.fromhex('A5001869') + b'(..)' + bytes.fromhex('38E562B0034C') + b'(..)' + bytes.fromhex('C9') + b'(..)' + bytes.fromhex('90034C') + b'(..)', re.S)
+    for mt in pat.finditer(rom_bytes):
+        o = int.from_bytes(mt.group(1), "little"); lim = int.from_bytes(mt.group(3), "little")
+        r = lim - o - 0x100
+        if mt.group(2) != mt.group(4) or not (0 <= o < 0x80 and 0 <= r < 0x80):
+            continue
+        base = file_to_lorom(mt.start())
+        at = lambda off: (base & 0xFF0000) | ((base + off) & 0xFFFF)
+        lo = f"(rt_ws_extra > 0x{o:X} ? rt_ws_extra : 0x{o:X})"
+        hi = f"(rt_ws_extra > 0x{r:X} ? rt_ws_extra : 0x{r:X})"
+        ov[at(3)] = f"adc16(c, (uint16_t){lo});"
+        ov[at(14)] = f"cmp16(c, c->a, (uint16_t)({lo} + 0x100 + {hi}));"
+    # The stone giant's flying head turns back at the 4:3 screen edges (X - 24 < camera, and
+    # X - 216 >= camera). With widescreen it turns at the wide picture's edges instead, but
+    # never beyond the arena's own ends.
+    for m in re.finditer(re.escape(bytes.fromhex('A50038E91800C562B0')), rom_bytes):
+        base = file_to_lorom(m.start())
+        ov[(base & 0xFF0000) | ((base + 3) & 0xFFFF)] = "sbc16(c, (uint16_t)(0x0018 - rt_ws_reach_left()));"
+    for m in re.finditer(re.escape(bytes.fromhex('A500186928FFC56290')), rom_bytes):
+        base = file_to_lorom(m.start())
+        ov[(base & 0xFF0000) | ((base + 3) & 0xFFFF)] = "adc16(c, (uint16_t)(0xFF28 - rt_ws_reach_right()));"
     return ov
 
 
@@ -431,7 +456,7 @@ def emit(rom_bytes, tracer_obj, gen_dir, rom_sha1, hints=None, log=print):
     rom, tracer, FLAG_HINTS = rom_bytes, tracer_obj, (hints or {}).get("flags_after", {})
     global OVERRIDES
     OVERRIDES = find_overrides(rom)
-    log(f"widescreen sprite patches: {len(OVERRIDES)} instructions in {len(OVERRIDES) // 4} draw helpers")
+    log(f"widescreen sprite patches: {len(OVERRIDES)} instructions")
     gen = pathlib.Path(gen_dir)
     gen.mkdir(parents=True, exist_ok=True)
     for old in gen.glob("*.c"):

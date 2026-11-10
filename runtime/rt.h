@@ -45,6 +45,16 @@ RT_INLINE uint16_t rd16z(uint16_t a) { return (uint16_t)(rd8(a) | (rd8((uint16_t
 RT_INLINE void     wr16z(uint16_t a, uint16_t v) { wr8(a, (uint8_t)v); wr8((uint16_t)(a + 1), (uint8_t)(v >> 8)); }
 RT_INLINE uint32_t rd24z(uint16_t a) { return rd16z(a) | ((uint32_t)rd8((uint16_t)(a + 2)) << 16); }
 RT_INLINE uint32_t rd24l(uint32_t a) { return rd16l(a) | ((uint32_t)rd8(a + 2) << 16); }
+/* [widescreen] how far the wide picture reaches past the 4:3 one on each side, never past the
+ * room's own ends (camera X is $62 - 0x180; the room is $86 * 16 + 256 px wide) */
+RT_INLINE int rt_ws_reach_left(void) {
+    int cam = (int)rd16z(0x62) - 0x180, e = rt_ws_extra;
+    return cam < e ? (cam > 0 ? cam : 0) : e;
+}
+RT_INLINE int rt_ws_reach_right(void) {
+    int room = (int)rd16z(0x86) * 16 - ((int)rd16z(0x62) - 0x180), e = rt_ws_extra;
+    return room < e ? (room > 0 ? room : 0) : e;
+}
 
 /* ---- stack ---- */
 RT_INLINE void push8(Cpu *c, uint8_t v) {

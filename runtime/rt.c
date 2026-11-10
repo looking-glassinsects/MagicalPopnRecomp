@@ -1,6 +1,7 @@
 /* Runtime glue between recompiled code and the hardware (hw.c / LakeSnes):
  * bus, indirect-jump dispatch, interrupts, frame hook. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <setjmp.h>
 #include "rt.h"
@@ -23,7 +24,24 @@ void rt_halt(const char *why) {
 }
 
 uint8_t bus_read8(uint32_t addr) { return hw_read(addr); }
-void bus_write8(uint32_t addr, uint8_t v) { hw_write(addr, v); }
+Cpu *rt_dbg_cpu;    /* debug: the CPU, for POPN_WATCH */
+void bus_write8(uint32_t addr, uint8_t v) {
+    hw_write(addr, v);
+    /* debug: POPN_WATCH=hex WRAM address -> on writes there, print the value and the top of the
+     * 65816 stack (return addresses of the routines that led here) */
+    static long watch = -2; static int shown;
+    if (watch == -2) { const char *e = getenv("POPN_WATCH"); watch = e ? strtol(e, NULL, 16) : -1; }
+    if (watch >= 0 && rt_dbg_cpu && shown < 400) {
+        uint32_t b = addr >> 16, lo = addr & 0xFFFF;
+        uint32_t wa = (b == 0x7E || b == 0x7F) ? ((b - 0x7E) << 16 | lo) : ((b & 0x40) == 0 && lo < 0x2000 ? lo : 0xFFFFFFFF);
+        if (wa == (uint32_t)watch) {
+            shown++;
+            fprintf(stderr, "watch f%u %05X <- %02X  S=%04X stack:", hw_frame_count(), wa, v, rt_dbg_cpu->s);
+            for (int i = 1; i <= 12; i++) fprintf(stderr, " %02X", hw_read((uint16_t)(rt_dbg_cpu->s + i)));
+            fprintf(stderr, "\n");
+        }
+    }
+}
 
 /* ---------------------------------------------------------------- control flow */
 /* Code the build didn't recompile is logged once (so the builder can include it next time). */

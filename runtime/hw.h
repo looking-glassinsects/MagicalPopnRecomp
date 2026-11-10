@@ -57,6 +57,10 @@ int      hw_take_samples(int16_t *stereo, int max_frames);   /* new ~32 kHz samp
 void     hw_set_buttons(uint16_t mask);       /* bit = LakeSnes button index */
 const uint8_t *hw_wram(void);
 uint16_t hw_bg_hscroll(int layer);
+const uint32_t *hw_ws_stats(void);
+const uint16_t *hw_line_hscroll(int layer);  /* test: BG1/BG2 horizontal scroll of each line (1..224) of the last frame */
+int      hw_bg_vscroll(int layer);
+const uint16_t *hw_line_vscroll(int layer);         /* test: sprite pixels by the 4:3 edges (turns counting on) */
 int      hw_ws_failed(const char **info);   /* diagnostics: gameplay frame left in 4:3 */
 /* Motion smoothing: record each frame's scanline registers, then draw in-between frames. */
 void     hw_interp_enable(int on);
