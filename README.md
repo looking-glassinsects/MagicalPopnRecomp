@@ -2,6 +2,12 @@
 
 <h1 align="center">Magical Pop'n Recomp</h1>
 
+<p align="center">
+  <a href="https://github.com/looking-glassinsects/MagicalPopnRecomp/releases"><img src="https://img.shields.io/github/downloads/looking-glassinsects/MagicalPopnRecomp/total" alt="GitHub downloads (all releases)"></a>
+  <a href="https://github.com/looking-glassinsects/MagicalPopnRecomp/releases/latest"><img src="https://img.shields.io/github/downloads/looking-glassinsects/MagicalPopnRecomp/latest/total" alt="GitHub downloads (latest release)"></a>
+  <a href="https://github.com/looking-glassinsects/MagicalPopnRecomp/releases/latest"><img src="https://img.shields.io/github/v/release/looking-glassinsects/MagicalPopnRecomp" alt="GitHub release"></a>
+</p>
+
 A **static recompilation** of the SNES game *Magical Pop'n* (Pack-In-Video / Polestar, 1995).
 The game's 65816 code is translated into C ahead of time and compiled into a native Windows
 program, with a small menu for window size, fullscreen, smoothing, FPS, volume, controls and language.
