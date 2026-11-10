@@ -41,8 +41,6 @@ These are tracked on the [Issues](https://github.com/looking-glassinsects/Magica
 | [8](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/8) | Sprite flickers on the spring in the first area | Graphics |
 | [9](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/9) | Bottom of open doors shimmers when walking past | Graphics |
 | [10](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/10) | Frame drops in some rooms and when lots is on screen | Performance |
-| [11](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/11) | Fixes in v0.9.2 that still need testing | Needs testing |
-
 ## Quick start
 
 1. Download **`MagicalPopn-Builder.zip`** from the [latest release](https://github.com/looking-glassinsects/MagicalPopnRecomp/releases/latest) and extract it anywhere.
