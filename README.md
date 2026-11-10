@@ -3,10 +3,6 @@
 <h1 align="center">Magical Pop'n Recomp</h1>
 
 <p align="center">
-  <b>The SNES classic, recompiled into a native Windows game, with true 16:9 widescreen.</b>
-</p>
-
-<p align="center">
   <a href="https://github.com/looking-glassinsects/MagicalPopnRecomp/releases/latest"><img src="https://img.shields.io/github/v/release/looking-glassinsects/MagicalPopnRecomp?style=for-the-badge&color=ff69b4" alt="Latest release"></a>
   <a href="https://github.com/looking-glassinsects/MagicalPopnRecomp/releases"><img src="https://img.shields.io/github/downloads/looking-glassinsects/MagicalPopnRecomp/total?style=for-the-badge&color=9b59b6" alt="Total downloads"></a>
   <a href="https://github.com/looking-glassinsects/MagicalPopnRecomp/issues"><img src="https://img.shields.io/github/issues/looking-glassinsects/MagicalPopnRecomp?style=for-the-badge&color=5dade2" alt="Open issues"></a>
