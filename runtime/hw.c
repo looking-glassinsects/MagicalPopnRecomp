@@ -266,6 +266,7 @@ static const uint8_t *ws_vram_copy_lvl(Ppu *ppu, int l, const uint8_t *lvl, int 
     uint16_t map = ppu->bgLayer[l].tilemapAdr;
     uint8_t cur[0x800];
     int top = ((ppu->bgLayer[l].vScroll & 0x3ff) >> 4) - 4;
+    static int mdbg = -1; if (mdbg < 0) mdbg = getenv("POPN_MERGE_DEBUG") ? atoi(getenv("POPN_MERGE_DEBUG")) : 0;
     for (int i = 0; i < 0x400; i++) {
         uint16_t w = ppu->vram[(map + i) & 0x7fff];
         int trusted = (ppu->wsVramEpoch[(map + i) & 0x7fff] & 0x7fff) == ppu->wsEpoch;
@@ -276,7 +277,6 @@ static const uint8_t *ws_vram_copy_lvl(Ppu *ppu, int l, const uint8_t *lvl, int 
             if (R >= 0 && R < rows) { const uint8_t *p = lvl + R * 64 + (((c + d) & 31) * 2); lw = (uint16_t)(p[0] | (p[1] << 8)); }
         }
         if (lvl && !trusted && lw != 0xFFFF) w = lw;
-        static int mdbg = -1; if (mdbg < 0) mdbg = getenv("POPN_MERGE_DEBUG") ? atoi(getenv("POPN_MERGE_DEBUG")) : 0;
         if (lvl && mdbg && (i >> 5) == ((top + mdbg) & 31))
             fprintf(stderr, "merge f%u L%d c%d trusted %d load %d vram %04x level %04x used %04x\n", hw_frame_count(), l, i & 31, trusted,
                     (ppu->wsVramEpoch[(map + i) & 0x7fff] >> 15) & 1, ppu->vram[(map + i) & 0x7fff], lw, w);
@@ -289,7 +289,6 @@ static const uint8_t *ws_vram_copy_lvl(Ppu *ppu, int l, const uint8_t *lvl, int 
     }
     return vstable[l];
 }
-static const uint8_t *ws_vram_copy(Ppu *ppu, int l) { return ws_vram_copy_lvl(ppu, l, NULL, 0, 0, 0); }
 /* the room's set-up wrote (nearly) the layer's whole tilemap: a room drawn once and never
  * streamed (the throne room), so its tilemap is the picture. Rooms that stream set up only the
  * part on screen and keep filler elsewhere in the tilemap. */
@@ -310,17 +309,28 @@ static void ws_src_vram(Ppu *ppu, int l) {
     if (l == 0 && ppu->wsSrc[0].valid && !ppu->wsSrc[0].vring && ppu->wsSrc[0].stride == 64) {
         lvl = ppu->wsSrc[0].base; rows = ppu->wsSrc[0].rows; d = ppu->wsSrc[0].delta; rd = ppu->wsSrc[0].rdelta;
     }
-    ppu->wsSrc[l].valid = true; ppu->wsSrc[l].base = ws_vram_copy_lvl(ppu, l, lvl, rows, d, rd); ppu->wsSrc[l].stride = 64;
-    ppu->wsSrc[l].width = 32; ppu->wsSrc[l].rows = 32; ppu->wsSrc[l].delta = 0; ppu->wsSrc[l].rdelta = 0;
-    ppu->wsSrc[l].vring = 1; ppu->wsSrc[l].refCol = -1;
+    ws_src_vram_lvl(ppu, l, lvl, rows, d, rd);
 }
 static void ws_back_from_vram(Ppu *ppu) {
     ws_src_vram(ppu, 1);
     ppu->wsSrc[1].clamp = false;
 }
 
+/* debug switches, read once: POPN_WS_DEBUG=level, POPN_NO_SPRITE_WS, POPN_WS_LAYERS, POPN_HIDE_BG=mask */
+static struct { int init, level, no_sprite_ws, layers, hide; } g_wsdbg;
+static void ws_debug_init(void) {
+    const char *e = getenv("POPN_WS_DEBUG");
+    g_wsdbg.level = e ? (atoi(e) ? atoi(e) : 1) : 0;
+    g_wsdbg.no_sprite_ws = getenv("POPN_NO_SPRITE_WS") != NULL;
+    g_wsdbg.layers = getenv("POPN_WS_LAYERS") != NULL;
+    e = getenv("POPN_HIDE_BG"); g_wsdbg.hide = e ? atoi(e) : 0;
+    g_wsdbg.init = 1;
+}
+
 static void popn_ws_hook(Ppu *ppu, void *user) {
     Snes *s = (Snes *)user;
+    if (!g_wsdbg.init) ws_debug_init();
+    const int dbg = g_wsdbg.level;
     static const struct { int bank_off, stride_var; } L[2] = {{0x0000, 0x84}, {0x10000, 0x9A}};
     ppu->wsBgMask = 0;
     ppu->wsCamLine = 1;
@@ -347,7 +357,7 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
             continue;
         }
         int stride = s->ram[L[l].stride_var] | (s->ram[L[l].stride_var + 1] << 8);
-        if (getenv("POPN_WS_DEBUG") && (s->frames % 60 == 0 || atoi(getenv("POPN_WS_DEBUG")) == 2))
+        if (dbg && (s->frames % 60 == 0 || dbg == 2))
             fprintf(stderr, "ws f%u BG%d main %d%d%d%d%d sub %d%d%d%d%d cam62 %04x bg3 h%d v%d map %04x m7c %02x big %d wider %d higher %d stride %d\n", s->frames, l + 1,
                     ppu->layer[0].mainScreenEnabled, ppu->layer[1].mainScreenEnabled, ppu->layer[2].mainScreenEnabled,
                     ppu->layer[3].mainScreenEnabled, ppu->layer[4].mainScreenEnabled, ppu->layer[0].subScreenEnabled,
@@ -388,7 +398,7 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
         const uint8_t *base = s->ram + L[l].bank_off + 0xC100;
         WsAnchor *a = &g_anchor[l];
         int d = ws_match(ppu, l, base, stride, rows, a);
-        if (getenv("POPN_WS_DEBUG") && atoi(getenv("POPN_WS_DEBUG")) == 5 && l == 0) {   /* debug: whole map rows */
+        if (dbg == 5 && l == 0) {   /* debug: whole map rows */
             for (int r = 4; r < 12; r++) {
                 fprintf(stderr, "row %d vram:", r);
                 for (int c = 0; c < 32; c++) fprintf(stderr, " %04x", ppu->vram[(ppu->bgLayer[0].tilemapAdr + r * 32 + c) & 0x7fff]);
@@ -397,13 +407,13 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
                 fprintf(stderr, "\n");
             }
         }
-        if (getenv("POPN_WS_DEBUG") && atoi(getenv("POPN_WS_DEBUG")) == 4) {   /* debug: bands of line scroll (last frame) */
+        if (dbg == 4) {   /* debug: bands of line scroll (last frame) */
             fprintf(stderr, "BG%d bands:", l + 1);
             for (int ln = 1; ln < 225; ln++)
                 if (ln == 1 || ppu->wsLineH[l][ln] != ppu->wsLineH[l][ln - 1]) fprintf(stderr, " %d:%d", ln, ppu->wsLineH[l][ln]);
             fprintf(stderr, "\n");
         }
-        if (getenv("POPN_WS_DEBUG") && atoi(getenv("POPN_WS_DEBUG")) == 3 && d >= 0) {   /* debug: tilemap vs level map, a few rows */
+        if (dbg == 3 && d >= 0) {   /* debug: tilemap vs level map, a few rows */
             int hh = ppu->bgLayer[l].hScroll & 0x3ff, vv = ppu->bgLayer[l].vScroll & 0x3ff;
             for (int y = 40; y < 200; y += 32) {
                 int lr = (y + vv) >> 4, mc0 = hh >> 4;
@@ -446,7 +456,7 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
                 d = d2; a->delta = d2; a->rdelta = tmp.rdelta; a->locked = 1;
             }
         }
-        if (getenv("POPN_WS_DEBUG") && (s->frames % 60 == 0 || atoi(getenv("POPN_WS_DEBUG")) == 2))
+        if (dbg && (s->frames % 60 == 0 || dbg == 2))
             fprintf(stderr, "ws f%u BG%d stride %d rows %d h %d v %d -> d %d (best %d/%d, distinct %d, odd %d) map %04x\n",
                     s->frames, l + 1, stride, rows, ppu->bgLayer[l].hScroll, ppu->bgLayer[l].vScroll, d,
                     g_dbg_best, g_dbg_total, g_dbg_nseen, g_dbg_odd, ppu->bgLayer[l].tilemapAdr);
@@ -586,7 +596,7 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
                 ppu->wsRefH = hc;
                 ppu->wsCamLine = cam_line;
             }
-            if (getenv("POPN_WS_DEBUG") && atoi(getenv("POPN_WS_DEBUG")) == 2)
+            if (dbg == 2)
                 fprintf(stderr, "   cam %d cam_r %d h %d clamp %d lx [%d,%d) line %d load %d\n", cam, cam_r, hc, ppu->wsSrc[l].clamp, ppu->wsSrc[l].lxMin, ppu->wsSrc[l].lxMax, cam_line, ppu->wsEpoch);
             if (narrow && !ppu->wsSrc[l].clamp) { ppu->wsSrc[l].valid = false; continue; }
             if (narrow && ws_tilemap_complete(ppu, 0)) ws_src_vram(ppu, 0);
@@ -620,9 +630,9 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
                  ppu->bgLayer[0].tilemapHigher, g_dbg_best, g_dbg_total, g_dbg_nseen, g_dbg_odd);
     }
     rt_ws_extra = ppu->wsBlank ? 0 : ppu->wsExtra;     /* applies to the sprites the game draws next */
-    if (getenv("POPN_NO_SPRITE_WS")) rt_ws_extra = 0;
-    ppu->wsDebugLayers = getenv("POPN_WS_LAYERS") != NULL;
-    { static int hide = -1; if (hide < 0) hide = getenv("POPN_HIDE_BG") ? atoi(getenv("POPN_HIDE_BG")) : 0; ppu->wsDebugHide = (uint8_t)hide; }
+    if (g_wsdbg.no_sprite_ws) rt_ws_extra = 0;
+    ppu->wsDebugLayers = g_wsdbg.layers;
+    ppu->wsDebugHide = (uint8_t)g_wsdbg.hide;
 }
 
 void hw_set_sprite_limit(int on) { g->ppu->noSpriteLimit = !on; }

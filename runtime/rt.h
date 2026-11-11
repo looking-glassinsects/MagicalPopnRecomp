@@ -1,4 +1,4 @@
-/* Helpers used by generated code (out/gen/*.c). Semantics follow bsnes' 65816 core. */
+/* Helpers used by the generated code (the gen folder's code files). Semantics follow bsnes' 65816 core. */
 #pragma once
 #include "cpu_state.h"
 
@@ -47,12 +47,16 @@ RT_INLINE uint32_t rd24z(uint16_t a) { return rd16z(a) | ((uint32_t)rd8((uint16_
 RT_INLINE uint32_t rd24l(uint32_t a) { return rd16l(a) | ((uint32_t)rd8(a + 2) << 16); }
 /* [widescreen] how far the wide picture reaches past the 4:3 one on each side, never past the
  * room's own ends (camera X is $62 - 0x180; the room is $86 * 16 + 256 px wide) */
+/* (read straight from WRAM: a bus read would take CPU time the original code doesn't spend) */
+RT_INLINE int rt_wram16(int a) { const uint8_t *w = hw_wram(); return w[a] | (w[a + 1] << 8); }
 RT_INLINE int rt_ws_reach_left(void) {
-    int cam = (int)rd16z(0x62) - 0x180, e = rt_ws_extra;
+    int e = rt_ws_extra; if (!e) return 0;
+    int cam = rt_wram16(0x62) - 0x180;
     return cam < e ? (cam > 0 ? cam : 0) : e;
 }
 RT_INLINE int rt_ws_reach_right(void) {
-    int room = (int)rd16z(0x86) * 16 - ((int)rd16z(0x62) - 0x180), e = rt_ws_extra;
+    int e = rt_ws_extra; if (!e) return 0;
+    int room = rt_wram16(0x86) * 16 - (rt_wram16(0x62) - 0x180);
     return room < e ? (room > 0 ? room : 0) : e;
 }
 
