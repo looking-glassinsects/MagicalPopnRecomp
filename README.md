@@ -54,6 +54,9 @@ Levels are rendered wider rather than stretched, so the pixels keep their shape 
 > Any dump works: `.sfc`, `.smc` or `.zip`, with or without a copier header, the original
 > Japanese release or a translated/patched version.
 
+> [!NOTE]
+> Linux support is planned, once the game is in a comfortable state on Windows.
+
 The game is placed in a `MagicalPopn` folder next to the builder, and you can move that folder anywhere.
 The download includes its own C compiler ([llvm-mingw](https://github.com/mstorsjo/llvm-mingw),
 clang + lld, trimmed to 64-bit Windows) in the `toolchain` folder, so the builder never needs
