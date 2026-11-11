@@ -806,21 +806,73 @@ static int ip_debug(void) {   /* POPN_IP_DEBUG: print each object's matching to 
     if (v < 0) v = getenv("POPN_IP_DEBUG") != NULL;
     return v;
 }
+enum { IP_MAXC = 6 };
+typedef struct { int nc[128], cx[128][IP_MAXC], cy[128][IP_MAXC], cg[128][IP_MAXC]; } IpPairs;
+/* The motion of one group of sprites (mem[0..n)): the motion supported by the most pieces (a piece
+ * supports it if one of its pairings is within 1 px; ties go to the smaller motion), provided
+ * enough of the group agrees (all of it if `all`). Returns 1 and the motion, or 0: no motion. */
+static int ip_group_motion(const IpPairs *q, const int *mem, int n, int all, int *obx, int *oby) {
+    int best = 0, bx = 0, by = 0;
+    for (int a = 0; a < n; a++)
+        for (int c = 0; c < q->nc[mem[a]]; c++) {
+            int mx = q->cx[mem[a]][c], my = q->cy[mem[a]][c], sup = 0;
+            for (int b = 0; b < n; b++)
+                for (int e = 0; e < q->nc[mem[b]]; e++)
+                    if (abs(q->cx[mem[b]][e] - mx) <= 1 && abs(q->cy[mem[b]][e] - my) <= 1) { sup++; break; }
+            if (sup > best || (sup == best && abs(mx) + abs(my) < abs(bx) + abs(by))) { best = sup; bx = mx; by = my; }
+        }
+    *obx = bx; *oby = by;
+    if (!best) return 0;
+    /* most of the group must agree; for a big step nearly all of it, since tiles sit on an 8 px
+     * grid and a pose change can line a few of them up at exactly such a step */
+    int big = abs(bx) >= 6 || abs(by) >= 6;
+    if (all ? best < n : big ? best * 5 < n * 4 : best * 5 < n * 3) return 0;
+    /* New artwork in the same tiles together with a jump of more than a few pixels is a pose
+     * change, not motion: the game moves the sprite to where the new pose's artwork sits
+     * (crouch-attacking drops it 8 px; real motion with an animation step, like a fall, stays
+     * under 6 px a frame). Sliding the new artwork in from the old spot would draw the
+     * character out of place, so it is shown where it is now. */
+    if (big) {
+        int same = 0, changed = 0;
+        for (int a = 0; a < n; a++)
+            for (int e = 0; e < q->nc[mem[a]]; e++)
+                if (abs(q->cx[mem[a]][e] - bx) <= 1 && abs(q->cy[mem[a]][e] - by) <= 1) { if (q->cg[mem[a]][e]) same++; else changed++; break; }
+        if (changed > same) return 0;
+    }
+    return 1;
+}
+
 static void ip_sprite_motion(int xs[2][128], int ys[2][128], int sz[2][128], uint16_t key[2][128],
                              const uint32_t *gfx_prev, const uint32_t *gfx_cur, int obj_size,
-                             int *mdx, int *mdy, int *have) {
+                             const int *wdx, const int *wdy, int *mdx, int *mdy, int *have) {
     static const int SIZES[8][2] = {{8, 16}, {8, 32}, {8, 64}, {16, 32}, {16, 64}, {32, 64}, {16, 32}, {16, 32}};
-    enum { MAXC = 6 };
-    int nc[128], cx[128][MAXC], cy[128][MAXC], cg[128][MAXC], on[128];
+    IpPairs pairs, *q = &pairs;
+    int on[128];
     for (int i = 0; i < 128; i++) {
-        mdx[i] = mdy[i] = have[i] = 0; nc[i] = 0;
+        mdx[i] = mdy[i] = have[i] = 0; q->nc[i] = 0;
         on[i] = !(ys[1][i] >= 224 && ys[1][i] < 240);               /* not parked off screen */
         if (!on[i]) continue;
-        for (int j = 0; j < 128 && nc[i] < MAXC; j++) {
+        for (int j = 0; j < 128 && q->nc[i] < IP_MAXC; j++) {
             if (key[0][j] != key[1][i] || sz[0][j] != sz[1][i] || (ys[0][j] >= 224 && ys[0][j] < 240)) continue;
             int ddx = ((xs[1][i] - xs[0][j] + 256) & 511) - 256, ddy = ((ys[1][i] - ys[0][j] + 128) & 255) - 128;
             if (ddx < -IP_SPR_R || ddx > IP_SPR_R || ddy < -IP_SPR_R || ddy > IP_SPR_R) continue;
-            cx[i][nc[i]] = ddx; cy[i][nc[i]] = ddy; cg[i][nc[i]] = gfx_prev[j] == gfx_cur[i]; nc[i]++;
+            int with_bg = abs(ddx - wdx[i]) <= 1 && abs(ddy - wdy[i]) <= 1;
+            q->cx[i][q->nc[i]] = ddx; q->cy[i][q->nc[i]] = ddy; q->cg[i][q->nc[i]] = with_bg || gfx_prev[j] == gfx_cur[i]; q->nc[i]++;
+        }
+        /* A sprite that animates by showing another tile every frame (a spinning star) has no
+         * pairing by tile. If the background scrolled and a sprite of the same size and palette
+         * was exactly where this one would have been had it stayed put in the level, it is that
+         * sprite: it moves with the background, whatever it shows. */
+        if ((wdx[i] || wdy[i]) && q->nc[i] < IP_MAXC) {
+            int found = 0;
+            for (int c = 0; c < q->nc[i]; c++) if (abs(q->cx[i][c] - wdx[i]) <= 1 && abs(q->cy[i][c] - wdy[i]) <= 1) found = 1;
+            for (int j = 0; j < 128 && !found; j++) {
+                if (sz[0][j] != sz[1][i] || ((key[0][j] ^ key[1][i]) & 0x0E00) || (ys[0][j] >= 224 && ys[0][j] < 240)) continue;
+                int ddx = ((xs[1][i] - xs[0][j] + 256) & 511) - 256, ddy = ((ys[1][i] - ys[0][j] + 128) & 255) - 128;
+                if (abs(ddx - wdx[i]) > 1 || abs(ddy - wdy[i]) > 1) continue;
+                q->cx[i][q->nc[i]] = ddx; q->cy[i][q->nc[i]] = ddy; q->cg[i][q->nc[i]] = 1; q->nc[i]++;
+                found = 1;
+            }
         }
     }
     /* objects: connected groups of nearby on-screen sprites (union-find) */
@@ -846,46 +898,29 @@ static void ip_sprite_motion(int xs[2][128], int ys[2][128], int sz[2][128], uin
         int mem[128], n = 0;
         for (int i = 0; i < 128; i++) if (on[i] && par[i] == root) mem[n++] = i;
         if (!n) continue;
-        /* the motion supported by the most pieces (a piece supports it if one of its pairings
-         * is within 1 px); ties go to the smaller motion */
-        int best = 0, bx = 0, by = 0;
-        for (int a = 0; a < n; a++)
-            for (int c = 0; c < nc[mem[a]]; c++) {
-                int mx = cx[mem[a]][c], my = cy[mem[a]][c], sup = 0;
-                for (int b = 0; b < n; b++)
-                    for (int e = 0; e < nc[mem[b]]; e++)
-                        if (abs(cx[mem[b]][e] - mx) <= 1 && abs(cy[mem[b]][e] - my) <= 1) { sup++; break; }
-                if (sup > best || (sup == best && abs(mx) + abs(my) < abs(bx) + abs(by))) { best = sup; bx = mx; by = my; }
-            }
+        int bx, by, moves = ip_group_motion(q, mem, n, 0, &bx, &by);
         if (ip_debug()) {
-            fprintf(stderr, "obj n=%d best=%d motion %d,%d :", n, best, bx, by);
+            fprintf(stderr, "obj n=%d motion %d,%d %s:", n, bx, by, moves ? "moves" : "stays");
             for (int a = 0; a < n; a++) {
                 int i = mem[a];
                 fprintf(stderr, " [%d @%d,%d k%04x s%d", i, xs[1][i], ys[1][i], key[1][i], sz[1][i]);
-                for (int c = 0; c < nc[i]; c++) fprintf(stderr, " %+d%+d", cx[i][c], cy[i][c]);
+                for (int c = 0; c < q->nc[i]; c++) fprintf(stderr, " %+d%+d", q->cx[i][c], q->cy[i][c]);
                 fprintf(stderr, "]");
             }
             fprintf(stderr, "\n");
         }
-        if (!best) continue;
-        /* most of the object must agree; for a big step nearly all of it, since tiles sit on
-         * an 8 px grid and a pose change can line a few of them up at exactly such a step */
-        int big = abs(bx) >= 6 || abs(by) >= 6;
-        if (big ? best * 5 < n * 4 : best * 5 < n * 3) continue;
-        /* New artwork in the same tiles together with a jump of more than a few pixels is a
-         * pose change, not motion: the game moves the sprite to where the new pose's artwork
-         * sits (crouch-attacking drops it 8 px; real motion with an animation step, like a
-         * fall, stays under 6 px a frame). Sliding the new artwork in from the old spot
-         * would draw the character out of place, so it is shown where it is now. */
-        if (abs(bx) >= 6 || abs(by) >= 6) {
-            int same = 0, changed = 0;
-            for (int a = 0; a < n; a++)
-                for (int e = 0; e < nc[mem[a]]; e++)
-                    if (abs(cx[mem[a]][e] - bx) <= 1 && abs(cy[mem[a]][e] - by) <= 1) { if (cg[mem[a]][e]) same++; else changed++; break; }
-            if (changed > same) { if (ip_debug()) fprintf(stderr, "  -> pose change\n"); continue; }
+        if (moves) for (int a = 0; a < n; a++) { mdx[mem[a]] = bx; mdy[mem[a]] = by; have[mem[a]] = 1; }
+        /* Two different things that touch (the heroine walking past a door) land in one group, and
+         * the group's motion is then wrong for one of them, or there is none: the door would stand
+         * still for a picture while the background behind it moves. So the pieces of each palette
+         * are looked at on their own as well: two or more that all agree on a motion follow that. */
+        for (int pal = 0; pal < 8 && n > 1; pal++) {
+            int sub[128], m = 0, sx, sy;
+            for (int a = 0; a < n; a++) if (((key[1][mem[a]] >> 9) & 7) == pal) sub[m++] = mem[a];
+            if (m < 2 || m == n || !ip_group_motion(q, sub, m, 1, &sx, &sy)) continue;
+            if (ip_debug()) fprintf(stderr, "  palette %d: %d pieces move %d,%d\n", pal, m, sx, sy);
+            for (int a = 0; a < m; a++) { mdx[sub[a]] = sx; mdy[sub[a]] = sy; have[sub[a]] = 1; }
         }
-        if (ip_debug()) fprintf(stderr, "  -> moves %d,%d\n", bx, by);
-        for (int a = 0; a < n; a++) { mdx[mem[a]] = bx; mdy[mem[a]] = by; have[mem[a]] = 1; }
     }
 }
 
@@ -918,8 +953,21 @@ static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, u
                 sz[f][i] = (fr[f]->high[byte] >> (hb + 1)) & 1;
                 key[f][i] = fr[f]->oam[i * 2 + 1];
             }
+        /* how far a sprite standing still in the level moved on screen: the opposite of the
+         * playfield's scroll since the previous frame, on the sprite's own lines */
+        int wdx[128], wdy[128];
+        for (int i = 0; i < 128; i++) {
+            int line = ys[1][i] + 8; if (line < 1) line = 1; if (line > cur->lines) line = cur->lines;
+            wdx[i] = wdy[i] = 0;
+            if (line < 1 || line > 239 || !cur->has[line] || !prev->has[line]) continue;
+            const Ppu *c1 = (const Ppu *)((const uint8_t *)cur->regs[line] - RG_START);
+            const Ppu *c0 = (const Ppu *)((const uint8_t *)prev->regs[line] - RG_START);
+            int dh = ((c1->bgLayer[0].hScroll - c0->bgLayer[0].hScroll + 512) & 0x3ff) - 512;
+            int dv = ((c1->bgLayer[0].vScroll - c0->bgLayer[0].vScroll + 512) & 0x3ff) - 512;
+            if (abs(dh) <= IP_SPR_R && abs(dv) <= IP_SPR_R) { wdx[i] = -dh; wdy[i] = -dv; }
+        }
         int mdx_of[128], mdy_of[128], have_of[128];
-        ip_sprite_motion(xs, ys, sz, key, prev->gfx, cur->gfx, p->objSize, mdx_of, mdy_of, have_of);
+        ip_sprite_motion(xs, ys, sz, key, prev->gfx, cur->gfx, p->objSize, wdx, wdy, mdx_of, mdy_of, have_of);
         for (int i = 0; i < 128; i++) {
             int mdx = mdx_of[i], mdy = mdy_of[i], have = have_of[i];
             int x = xs[1][i], y = ys[1][i];

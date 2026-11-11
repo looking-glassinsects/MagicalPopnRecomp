@@ -526,7 +526,8 @@ static void on_vblank_headless(void) {
                 }
                 fprintf(rep, "%u %u %u\n", g_frames_run, d1, d0);
                 static unsigned t1_n;
-                if ((d1 && t1_n < 40) || (d0 > 400 && d0 < (unsigned)(w * 224) / 2 && worst_n < 20)) {   /* keep evidence */
+                static int keep = -1; if (keep < 0) { const char *e = getenv("POPN_IP_KEEP"); keep = e ? atoi(e) : 400; }   /* smallest t=0 difference worth keeping */
+                if ((d1 && t1_n < 40) || (d0 > (unsigned)keep && d0 < (unsigned)(w * 224) / 2 && worst_n < 20)) {   /* keep evidence */
                     if (d1) t1_n++; else worst_n++;
                     static uint8_t rgb[HW_WIDE_MAX_W * 224 * 3];
                     char p[1024];

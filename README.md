@@ -29,7 +29,7 @@ program, with a small menu for window size, fullscreen, smoothing, FPS, volume, 
 > The builder reads it on your PC and produces `MagicalPopn.exe`.
 
 > [!NOTE]
-> This is version **0.9.4.1**, so there is a slight chance of bugs. If you find one, please
+> This is version **0.9.4.2**, so there is a slight chance of bugs. If you find one, please
 > [open an issue](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/new), ideally with a save state (F5) or a screenshot (F12).
 
 ## Native 16:9 widescreen
@@ -250,11 +250,20 @@ These are tracked on the [Issues](https://github.com/looking-glassinsects/Magica
 | 3 | [Side columns change while going through the tubes](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/6) | 16:9 |
 | 4 | [Mace ghosts and clones its sprite](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/7) | Motion smoothing |
 | 5 | [Sprite flickers on the spring in the first area](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/8) | Graphics |
-| 6 | [Bottom of open doors shimmers when walking past](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/9) | Graphics |
-| 7 | [Frame drops in some rooms and when lots is on screen](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/10) | Performance |
+| 6 | [Frame drops in some rooms and when lots is on screen](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/10) | Performance |
 
 > [!WARNING]
 > After loading a save state inside a narrow castle room, its 16:9 sides use the older method until you leave the room.
+
+<details>
+<summary><b>Fixed in 0.9.4.2</b></summary>
+
+<br>
+
+- With motion smoothing on, doors no longer shake when you walk in front of them ([#9](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/9)).
+- With motion smoothing on, the falling stars no longer shift against the background while the screen scrolls.
+
+</details>
 
 <details>
 <summary><b>New in 0.9.4.1</b></summary>
