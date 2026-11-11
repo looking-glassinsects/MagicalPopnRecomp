@@ -43,7 +43,7 @@ RUNTIME_SRC = ["main.c", "rt.c", "hw.c", "platform_win32.c", "pad_win32.c", "men
 PIPELINE_VERSION = 3
 # This version of the project. A release is tagged "v" + VERSION; the game compares its own
 # VERSION with the newest release's tag to offer an update (runtime/update_win32.c).
-VERSION = "0.9.4.2"
+VERSION = "0.9.5"
 
 SESSIONS = [("attract", 1, 7200), ("menus", 1, 14400), ("menus", 2, 14400)] + \
            [("play", s, 43200) for s in range(1, 13)]
@@ -190,7 +190,10 @@ def build(rom_path, out_dir=None, thorough=None, force_unknown=False,
                      f"  session {sess[0]} #{sess[1]} done ({done_frames * 100 // total_frames}%)")
 
     # ---------------------------------------------------------------- 3. analyze
-    lib_hash = _hash_files([LAKESNES / f for f in LAKESNES_SRC], extra=tc.name)
+    # The console emulation (LakeSnes and the runtime) is where nearly all of a frame's time goes;
+    # the recompiled game code is under 1%, so only these two get the slower -O3 compile.
+    EMU_OPT = 3
+    lib_hash = _hash_files([LAKESNES / f for f in LAKESNES_SRC], extra=f"{tc.name} O{EMU_OPT}")
     lib_dir = common / f"lakesnes_{lib_hash}"
     if not lib_dir.exists():
         step(0.52, "Compiling the SNES hardware library")
@@ -199,7 +202,7 @@ def build(rom_path, out_dir=None, thorough=None, force_unknown=False,
             shutil.rmtree(tmp)
         tmp.mkdir()
         tc.compile([LAKESNES / f for f in LAKESNES_SRC], tmp, includes=[LAKESNES],
-                   defines=["_CRT_SECURE_NO_WARNINGS"], log=log)
+                   defines=["_CRT_SECURE_NO_WARNINGS"], opt=EMU_OPT, log=log)
         os.replace(tmp, lib_dir)
 
     (work / "popn.ico").write_bytes(icon.make_ico())
@@ -262,7 +265,7 @@ def build(rom_path, out_dir=None, thorough=None, force_unknown=False,
         objs = tc.compile(gen_c, obj, includes=inc, defines=["_CRT_SECURE_NO_WARNINGS"], log=log,
                           progress=lambda d, n: step(span(0.10 + 0.55 * d / n), f"  compiled {d}/{n} code files"))
         objs += tc.compile([RUNTIME / f for f in RUNTIME_SRC], obj, includes=inc,
-                           defines=["_CRT_SECURE_NO_WARNINGS"], warnings=False, log=log)
+                           defines=["_CRT_SECURE_NO_WARNINGS"], opt=EMU_OPT, warnings=False, log=log)
         step(span(0.70), "Linking")
         tc.link(objs + sorted(lib_dir.glob("*" + tc.obj)) + [res], exe_tmp, gui=True, log=log, cwd=work)
 

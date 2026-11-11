@@ -29,7 +29,7 @@ program, with a small menu for window size, fullscreen, smoothing, FPS, volume, 
 > The builder reads it on your PC and produces `MagicalPopn.exe`.
 
 > [!NOTE]
-> This is version **0.9.4.2**, so there is a slight chance of bugs. If you find one, please
+> This is version **0.9.5**, so there is a slight chance of bugs. If you find one, please
 > [open an issue](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/new), ideally with a save state (F5) or a screenshot (F12).
 
 ## Native 16:9 widescreen
@@ -196,11 +196,12 @@ in `states\`.
   every 6. A display thread redraws the frame with the console's own
   graphics chip, with each layer's scroll position and every sprite placed where they are at
   that exact moment between the last two frames. Pixel art stays crisp: nothing is blended or
-  smeared. Pictures are timed by a clock locked to the monitor's real refresh signal, so each
+  smeared. In-between pictures are drawn at half-pixel precision across, so a background that
+  scrolls one pixel per frame still gets a step in between. Pictures are timed by a clock locked to the monitor's real refresh signal, so each
   one stays on screen for exactly the same number of refreshes (two each at 120 fps on a
   240 Hz screen). Each picture is drawn a few milliseconds before its refresh and presented
   just after it, so a slow moment in the graphics driver doesn't make it miss its refresh. It
-  uses VSync and adds about 1.5 frames (~25 ms) of delay. Set it to 60 under Video for the
+  uses VSync and adds about 1.5 frames (~28 ms) of delay. Set it to 60 under Video for the
   lowest latency.
 - **With motion smoothing at 60** (or on a 60 Hz screen), each game frame is shown as it is. On
   a 120 Hz or 240 Hz monitor each frame stays for exactly 2 or 4 refreshes, so motion stays
@@ -255,7 +256,21 @@ These are tracked on the [Issues](https://github.com/looking-glassinsects/Magica
 | 5 | [Sprite flickers on the spring in the first area](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/8) | Graphics |
 
 > [!WARNING]
-> After loading a save state inside a narrow castle room, its 16:9 sides use the older method until you leave the room.
+> A save state made before 0.9.5 and loaded inside a narrow castle room shows its 16:9 sides with the older method until you leave the room. Saves made with 0.9.5 or later don't have this.
+
+<details>
+<summary><b>New in 0.9.5</b></summary>
+
+<br>
+
+- Motion smoothing is smoother: in-between pictures are now drawn at half-pixel precision across, so slow-scrolling backgrounds such as the forest's far trees move evenly instead of in steps.
+- The game runs faster: each frame takes about 20% less time in busy scenes, with the picture unchanged.
+- Castle rooms no longer show a patch of the wrong wall at the sides in 16:9 when the view moves up or down.
+- Save states now remember what the current room has drawn, so narrow castle rooms look right at the sides straight after loading. Older saves still load.
+- Sound comes back by itself if the output device goes away, for example when headphones are unplugged.
+- Messages in the corner and the FPS counter use the menu's font.
+
+</details>
 
 <details>
 <summary><b>Fixed in 0.9.4.2</b></summary>

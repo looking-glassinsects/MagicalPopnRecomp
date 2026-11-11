@@ -24,6 +24,9 @@ static HANDLE g_event, g_thread;
 static volatile LONG g_run;
 static UINT32 g_buf_frames;
 static volatile LONG g_underruns, g_fill_min = 1 << 30, g_fill_max, g_callbacks;
+static volatile LONG g_lost;             /* the output device went away (unplugged, disabled): reopen */
+static int g_want;                       /* audio_init was called: keep trying to have sound */
+static DWORD g_retry_tick;
 
 static int16_t g_ring[RING * 2];
 static volatile LONG g_w, g_r;           /* write/read positions (frames), wrap at 2^31 */
@@ -37,10 +40,16 @@ static int ring_fill(void) { return (int)(g_w - g_r); }
 static DWORD WINAPI audio_thread(LPVOID arg) {
     (void)arg;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    int fails = 0;
     while (g_run) {
         WaitForSingleObject(g_event, 100);
         UINT32 pad = 0;
-        if (FAILED(IAudioClient_GetCurrentPadding(g_client, &pad))) continue;
+        if (FAILED(IAudioClient_GetCurrentPadding(g_client, &pad))) {
+            /* headphones unplugged, device disabled, ...: this stream is dead for good */
+            if (++fails > 20) { InterlockedExchange(&g_lost, 1); break; }
+            continue;
+        }
+        fails = 0;
         UINT32 n = g_buf_frames - pad;
         if (!n) continue;
         BYTE *data;
@@ -68,8 +77,8 @@ static DWORD WINAPI audio_thread(LPVOID arg) {
     return 0;
 }
 
-int audio_init(void) {
-    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+static void audio_close(void);
+static int audio_open(void) {
     if (FAILED(CoCreateInstance(&A_CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL, &A_IID_IMMDeviceEnumerator, (void **)&g_enum))) return 0;
     if (FAILED(IMMDeviceEnumerator_GetDefaultAudioEndpoint(g_enum, eRender, eConsole, &g_dev))) return 0;
     if (FAILED(IMMDevice_Activate(g_dev, &A_IID_IAudioClient, CLSCTX_ALL, NULL, (void **)&g_client))) return 0;
@@ -80,15 +89,18 @@ int audio_init(void) {
     if (FAILED(IAudioClient_Initialize(g_client, AUDCLNT_SHAREMODE_SHARED, flags, 200000 /* 20 ms */, 0, &wf, NULL))) return 0;
     IAudioClient_GetBufferSize(g_client, &g_buf_frames);
     if (FAILED(IAudioClient_GetService(g_client, &A_IID_IAudioRenderClient, (void **)&g_render))) return 0;
-    g_event = CreateEventW(NULL, FALSE, FALSE, NULL);
-    IAudioClient_SetEventHandle(g_client, g_event);
+    if (!g_event) g_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!g_event || FAILED(IAudioClient_SetEventHandle(g_client, g_event))) return 0;
+    InterlockedExchange(&g_w, g_r);
+    InterlockedExchange(&g_lost, 0);
     g_run = 1;
     g_thread = CreateThread(NULL, 0, audio_thread, NULL, 0, NULL);
+    if (!g_thread) { g_run = 0; return 0; }
     IAudioClient_Start(g_client);
     return 1;
 }
 
-void audio_shutdown(void) {
+static void audio_close(void) {
     if (g_thread) { g_run = 0; SetEvent(g_event); WaitForSingleObject(g_thread, 1000); CloseHandle(g_thread); g_thread = 0; }
     if (g_client) IAudioClient_Stop(g_client);
     if (g_render) IAudioRenderClient_Release(g_render);
@@ -97,6 +109,16 @@ void audio_shutdown(void) {
     if (g_enum) IMMDeviceEnumerator_Release(g_enum);
     g_render = 0; g_client = 0; g_dev = 0; g_enum = 0;
 }
+
+int audio_init(void) {
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    g_want = 1; g_retry_tick = GetTickCount();
+    if (audio_open()) return 1;
+    audio_close();                       /* nothing half-open is left behind; audio_push retries */
+    return 0;
+}
+
+void audio_shutdown(void) { g_want = 0; audio_close(); }
 
 void audio_clear(void) { InterlockedExchange(&g_w, g_r); }
 
@@ -108,6 +130,15 @@ static float hermite(float x0, float x1, float x2, float x3, float t) {
 }
 
 void audio_push(const int16_t *in, int frames, double in_rate, int volume) {
+    /* no sound device, or it went away: look again once a second (it may be plugged back in, or
+     * Windows may have another default device by now) */
+    if (g_want && (g_lost || !g_client)) {
+        DWORD now = GetTickCount();
+        if (now - g_retry_tick < 1000) return;
+        g_retry_tick = now;
+        audio_close();
+        if (!audio_open()) { audio_close(); return; }
+    }
     if (!g_client) return;
     /* dynamic rate control: nudge the step so the ring stays near TARGET_FILL */
     int fill = ring_fill();
