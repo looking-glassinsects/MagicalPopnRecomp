@@ -515,6 +515,7 @@ static HFONT make_font(int px) {
     return CreateFontW(-px, 0, 0, 0, g_font_state > 0 ? FW_NORMAL : FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
                        ANTIALIASED_QUALITY, 0, font_face());
 }
+void *menu_make_font(int px) { return make_font(px); }
 
 static int utf8_to_w(const char *s, wchar_t *w, int cap) {
     int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, w, cap);

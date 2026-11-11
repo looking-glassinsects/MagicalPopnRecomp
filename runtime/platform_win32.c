@@ -8,6 +8,7 @@
 #include <math.h>
 #include <limits.h>
 #include "platform.h"
+extern volatile int hw_fine_on;     /* hw.c: half-pixel pictures on (off when they take too long here) */
 #include "settings.h"
 #include "menu.h"
 #include "pad.h"
@@ -27,7 +28,8 @@ static LARGE_INTEGER g_freq;
 static DWORD g_last_mouse;
 
 /* frame */
-static uint32_t g_frame[544 * 224];
+static uint32_t g_frame[1088 * 224];       /* up to twice the widest picture: half-pixel pictures */
+static int g_frame_tw = 256;             /* its width in texels: g_frame_w, or twice that */
 static int g_frame_w = 256;
 
 /* GL textures */
@@ -178,7 +180,7 @@ int plat_init(const char *title) {
     if (!g_gl || !wglMakeCurrent(g_dc, g_gl)) return 0;
     p_wglSwapIntervalEXT = (PFNWGLSWAPINTERVALEXTPROC)wglGetProcAddress("wglSwapIntervalEXT");
 
-    t_game = make_tex(1024, 256, 0);
+    t_game = make_tex(2048, 256, 0);
     t_text_fps[0] = make_tex(512, 64, 1); t_text_fps[1] = make_tex(512, 64, 1);
     t_text_toast[0] = make_tex(1024, 64, 1); t_text_toast[1] = make_tex(1024, 64, 1);
     /* scanline mask: 1x2, second row darkened (premultiplied alpha) */
@@ -312,7 +314,10 @@ void plat_toggle_fullscreen(void) {
 void plat_note_emulated_frame(void) { g_emu_frames++; }
 
 void plat_toast(const char *utf8) {
-    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, g_toast, 128);
+    wchar_t full[512];                  /* a long text (a controller's name) is cut, never left unterminated */
+    if (!MultiByteToWideChar(CP_UTF8, 0, utf8, -1, full, 512)) full[0] = 0;
+    full[511] = 0;
+    wcsncpy(g_toast, full, 127); g_toast[127] = 0;
     g_toast_until = GetTickCount() + 2200;
     g_toast_dirty = 1;
     text_tick();                        /* draw its text now, so it never shows the old one */
@@ -353,8 +358,7 @@ static void text_render(TextImg *t, const wchar_t *text) {
     if (!bm) { DeleteDC(dc); return; }
     HGDIOBJ ob = SelectObject(dc, bm);
     memset(bits, 0, (size_t)t->tw * t->th * 4);
-    HFONT f = CreateFontW(-t->font_px, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0,
-                          g_set.language == LANG_JA ? L"Yu Gothic UI" : L"Segoe UI");
+    HFONT f = (HFONT)menu_make_font(t->font_px);        /* the menu's typeface */
     HGDIOBJ of = SelectObject(dc, f);
     SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(255, 255, 255));
     SIZE sz; GetTextExtentPoint32W(dc, text, (int)wcslen(text), &sz);
@@ -482,7 +486,7 @@ static void draw_all(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filt);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt);
     glColor4f(1, 1, 1, 1);
-    quad((float)gr.left, (float)gr.top, (float)gr.right, (float)gr.bottom, 0, 0, g_frame_w / 1024.0f, 224 / 256.0f);
+    quad((float)gr.left, (float)gr.top, (float)gr.right, (float)gr.bottom, 0, 0, g_frame_tw / 2048.0f, 224 / 256.0f);
     glEnable(GL_BLEND);
     if (g_set.scanlines && gr.bottom - gr.top >= 448) {
         glBindTexture(GL_TEXTURE_2D, t_scan);
@@ -538,7 +542,7 @@ void plat_present(const uint8_t *px, int width) {
     if (g_dt || width < 1 || width > 544) return;
     shown_log(px, width);
     memcpy(g_frame, px, (size_t)width * 224 * 4);
-    g_frame_w = width;
+    g_frame_w = width; g_frame_tw = width;
     glBindTexture(GL_TEXTURE_2D, t_game);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, 224, GL_BGRA_EXT, GL_UNSIGNED_BYTE, g_frame);
     g_fps_frames++;
@@ -560,7 +564,7 @@ void plat_redraw(void) {
  * and emulation, and must not use GL while the thread runs. */
 static volatile LONG g_dt_run;
 static int (*g_dt_render)(double, uint8_t *);
-static uint8_t g_dt_buf[544 * 224 * 4];
+static uint8_t g_dt_buf[1088 * 224 * 4];
 static volatile LONG g_dt_fps = 120;
 
 void plat_display_rate(int fps) { g_dt_fps = fps < 61 ? 61 : fps; }
@@ -705,6 +709,7 @@ static int vblank_thread_start(void) {
  * 240 Hz screen at 120 fps shows every picture for exactly two refreshes. */
 static void display_loop_vblank(FILE *pace) {
     int pace_n = 0, waited = 0;
+    double draw_ema = 0; DWORD fine_off_tick = 0;    /* half-pixel pictures: time to draw one, when they were turned off */
     long long last_idx = LLONG_MIN;
     DWORD mon_tick = GetTickCount();
     if (p_wglSwapIntervalEXT) p_wglSwapIntervalEXT(1);
@@ -734,7 +739,13 @@ static void display_loop_vblank(FILE *pace) {
          * slow drawing (~2 ms normally, now and then 3+) or a driver hiccup never makes it
          * miss its refresh. */
         enum { DT_AHEAD_US = 3000 };
-        const double ahead = DT_AHEAD_US / 1000.0;
+        /* Half-pixel pictures take about twice as long to draw, so drawing starts earlier (up to
+         * 6.5 ms, never before the previous picture is presented). If they still don't fit in
+         * that time on this machine, whole-pixel pictures are drawn instead for a while. */
+        if (!hw_fine_on && GetTickCount() - fine_off_tick > 10000) { hw_fine_on = 1; draw_ema = 0; }
+        double ahead_max = k * P - 1.5;
+        const double ahead = hw_fine_on ? (ahead_max < 6.5 ? (ahead_max > DT_AHEAD_US / 1000.0 ? ahead_max : DT_AHEAD_US / 1000.0) : 6.5)
+                                         : DT_AHEAD_US / 1000.0;
         double now = plat_now_ms();
         long long idx = AN + (long long)ceil((now + 1.0 - A) / P);   /* at least 1 ms away */
         if (last_idx != LLONG_MIN && idx <= last_idx) idx = last_idx + 1;
@@ -749,13 +760,18 @@ static void display_loop_vblank(FILE *pace) {
          * without the picture having to wait for it. */
         double target = v - ahead - 3.25;
         double t_draw = plat_now_ms();
-        int w = g_dt_render(target, g_dt_buf);
+        int w = g_dt_render(target, g_dt_buf);         /* half-pixel picture: 2 x w columns */
+        if (hw_fine_on) {
+            double took = plat_now_ms() - t_draw;
+            draw_ema = draw_ema ? draw_ema * 0.95 + took * 0.05 : took;
+            if (draw_ema > ahead + 0.5) { hw_fine_on = 0; fine_off_tick = GetTickCount(); }
+        }
         if (w > 0 && w <= 544) {
-            memcpy(g_frame, g_dt_buf, (size_t)w * 224 * 4);
-            g_frame_w = w;
+            memcpy(g_frame, g_dt_buf, (size_t)w * 2 * 224 * 4);
+            g_frame_w = w; g_frame_tw = 2 * w;
             glBindTexture(GL_TEXTURE_2D, t_game);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, 224, GL_BGRA_EXT, GL_UNSIGNED_BYTE, g_frame);
-            shown_log(g_dt_buf, w);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2 * w, 224, GL_BGRA_EXT, GL_UNSIGNED_BYTE, g_frame);
+            shown_log(g_dt_buf, 2 * w);
         }
         g_fps_frames++;
         /* present 1 ms after the refresh: clearly after it (so it can only be shown at the
@@ -805,12 +821,12 @@ static DWORD WINAPI display_thread(LPVOID arg) {
         if (target < now + 0.5) target = now + P * 0.5;
         if (phase == 0) {                                   /* a new picture; otherwise show it again */
             k = dt_refreshes_per_picture(hz);
-            int w = g_dt_render(target, g_dt_buf);
+            int w = g_dt_render(target, g_dt_buf);     /* half-pixel picture: 2 x w columns */
             if (w > 0 && w <= 544) {
-                memcpy(g_frame, g_dt_buf, (size_t)w * 224 * 4);
-                g_frame_w = w;
+                memcpy(g_frame, g_dt_buf, (size_t)w * 2 * 224 * 4);
+                g_frame_w = w; g_frame_tw = 2 * w;
                 glBindTexture(GL_TEXTURE_2D, t_game);
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, 224, GL_BGRA_EXT, GL_UNSIGNED_BYTE, g_frame);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2 * w, 224, GL_BGRA_EXT, GL_UNSIGNED_BYTE, g_frame);
             }
             g_fps_frames++;
         }

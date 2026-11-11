@@ -67,4 +67,10 @@ void     hw_interp_enable(int on);
 int      hw_interp_ready(void);                       /* previous and current frame recorded */
 int      hw_render_interp(float t, uint8_t *bgrx);    /* frame at t in (0,1) between them; returns width */
 int      hw_snapshot_publish(double t0_ms);           /* after a frame: hand it to the display thread */
+int      hw_ws_state_size(void);                       /* widescreen bookkeeping kept in save states */
+void     hw_ws_state_save(uint8_t *buf);
+int      hw_ws_state_load(const uint8_t *buf, int size);
 int      hw_snapshot_render(double when_ms, uint8_t *bgrx);   /* display thread: picture for that moment */
+#define  HW_FINE_MAX_W (2 * HW_WIDE_MAX_W)
+extern volatile int hw_fine_on;        /* 0: draw whole pixels only (too slow for this screen) */
+int      hw_snapshot_render_fine(double when_ms, uint8_t *bgrx); /* the same at half-pixel precision across (2 x width columns); returns the width */

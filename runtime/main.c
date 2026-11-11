@@ -21,6 +21,9 @@
 #include "png_write.h"
 #include "update.h"
 #include "gen.h"
+#ifdef POPN_PROF
+#include "prof.h"
+#endif
 
 enum { EXIT_QUIT = 2, EXIT_RESET = 4, EXIT_LOAD = 5 };
 #define FRAME_MS (1000.0 / 60.0988)
@@ -53,7 +56,7 @@ typedef struct StateHeader {
 
 static int g_capture_slot;          /* 0 = auto (continue), 1..9 = slots, -1 = test file */
 static int g_quit_after_capture, g_quit_wait;
-static uint8_t *g_load_buf; static int g_load_slot;
+static uint8_t *g_load_buf; static int g_load_slot, g_load_size;
 static char g_test_state[MAX_PATH + 32];
 
 static void slot_path(int slot, char *out, int size) {
@@ -76,8 +79,8 @@ static void toastf(int id, int n) { char b[128]; snprintf(b, sizeof b, tr(id), n
 
 /* reached a capture point (exact CPU state at pc) */
 static void on_capture(const HwRegs *r, uint32_t pc) {
-    int size = hw_state_size();
-    uint8_t *buf = malloc(sizeof(StateHeader) + size);
+    int size = hw_state_size(), extra = hw_ws_state_size();
+    uint8_t *buf = malloc(sizeof(StateHeader) + size + extra);
     if (!buf) { if (g_capture_slot > 0) toastf(T_SAVE_FAILED, g_capture_slot); return; }
     StateHeader *h = (StateHeader *)buf;
     memset(h, 0, sizeof *h);
@@ -85,11 +88,12 @@ static void on_capture(const HwRegs *r, uint32_t pc) {
     h->pc = pc; h->a = r->a; h->x = r->x; h->y = r->y; h->s = r->s; h->d = r->d;
     h->db = r->db; h->p = r->p; h->e = r->e; h->frames = hw_frame_count();
     h->hw_size = (uint32_t)hw_save_state(buf + sizeof *h);
+    hw_ws_state_save(buf + sizeof *h + h->hw_size);     /* after the console's state (older builds stop there) */
     /* write a temporary file and swap it in, so a crash or a forced close mid-write never
      * leaves a damaged state (the autosave rewrites "continue" every 10 s) */
     char path[MAX_PATH + 64], tmp[MAX_PATH + 72]; slot_path(g_capture_slot, path, sizeof path);
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    size_t n = sizeof *h + h->hw_size;
+    size_t n = sizeof *h + h->hw_size + extra;
     FILE *f = fopen(tmp, "wb");
     int ok = f && fwrite(buf, 1, n, f) == n;
     if (f && fclose(f) != 0) ok = 0;
@@ -112,8 +116,8 @@ static int read_state(int slot) {
     fclose(f);
     StateHeader *h = (StateHeader *)b;
     if (!ok || memcmp(h->magic, "MPOPNST1", 8) || memcmp(h->rom_sha1, GEN_ROM_SHA1, 40) ||
-        sizeof(StateHeader) + h->hw_size != (size_t)n) { free(b); return 0; }
-    free(g_load_buf); g_load_buf = b; g_load_slot = slot;
+        sizeof(StateHeader) + h->hw_size > (size_t)n) { free(b); return 0; }
+    free(g_load_buf); g_load_buf = b; g_load_slot = slot; g_load_size = (int)n;
     return 1;
 }
 
@@ -126,6 +130,8 @@ static void request_load(int slot) {
 static uint32_t apply_loaded_state(void) {
     StateHeader *h = (StateHeader *)g_load_buf;
     if (!hw_load_state(g_load_buf + sizeof *h, (int)h->hw_size)) return 0;
+    int extra = g_load_size - (int)sizeof *h - (int)h->hw_size;          /* states saved before 0.9.4.3 have none */
+    if (extra > 0) hw_ws_state_load(g_load_buf + sizeof *h + h->hw_size, extra);
     memset(&g_cpu, 0, sizeof g_cpu);
     g_cpu.a = h->a; g_cpu.x = h->x; g_cpu.y = h->y; g_cpu.s = h->s; g_cpu.d = h->d;
     g_cpu.db = h->db; g_cpu.p = h->p; g_cpu.e = h->e;
@@ -480,6 +486,16 @@ static void on_vblank_headless(void) {
                     for (int i = 0; i < ww * 224; i++) { rgb[i * 3] = g_mid[i * 4 + 2]; rgb[i * 3 + 1] = g_mid[i * 4 + 1]; rgb[i * 3 + 2] = g_mid[i * 4]; }
                     snprintf(path, sizeof path, "%s/f%05u_q%d.png", g_shot_dir, g_frames_run, k);
                     png_write_rgb(path, rgb, ww, 224);
+                    /* ...and the half-pixel picture the display thread now shows (twice as wide) */
+                    static uint8_t fine[HW_FINE_MAX_W * 224 * 4], frgb[HW_FINE_MAX_W * 224 * 3];
+                    LARGE_INTEGER q0, q1, q2, qf; QueryPerformanceCounter(&q0);
+                    (void)hw_snapshot_render(t0 + k * F / 4, g_mid); QueryPerformanceCounter(&q1);
+                    int fw = hw_snapshot_render_fine(t0 + k * F / 4, fine) * 2; QueryPerformanceCounter(&q2);
+                    if (getenv("POPN_SNAP_TIME")) { QueryPerformanceFrequency(&qf);   /* debug: drawing time, ms */
+                        fprintf(stderr, "snaptime %.3f %.3f\n", (q1.QuadPart - q0.QuadPart) * 1000.0 / qf.QuadPart, (q2.QuadPart - q1.QuadPart) * 1000.0 / qf.QuadPart); }
+                    for (int i = 0; i < fw * 224; i++) { frgb[i * 3] = fine[i * 4 + 2]; frgb[i * 3 + 1] = fine[i * 4 + 1]; frgb[i * 3 + 2] = fine[i * 4]; }
+                    snprintf(path, sizeof path, "%s/f%05u_q%d_fine.png", g_shot_dir, g_frames_run, k);
+                    if (fw) png_write_rgb(path, frgb, fw, 224);
                 }
             }
         }
@@ -592,7 +608,7 @@ static int smoothing_update(void) {
     int want = smoothing_active();
     if (want != g_ip_state) {
         hw_interp_enable(want);
-        plat_display_thread(want ? hw_snapshot_render : NULL);
+        plat_display_thread(want ? hw_snapshot_render_fine : NULL);
         g_ip_state = want;
         choose_pacing();
     }
@@ -887,6 +903,9 @@ int main(int argc, char **argv) {
         if (!read_state(-1)) { fprintf(stderr, "could not load state %s\n", g_load_state_arg); return 1; }
         g_state_test = 0;
     }
+#ifdef POPN_PROF
+    if (getenv("POPN_PROF")) prof_start();
+#endif
     int rc = g_load_buf ? EXIT_LOAD : 0, started = 0;
     for (;;) {
         rt.cpu = &g_cpu; rt.in_irq = 0; rt.interp_depth = 0;
@@ -909,6 +928,9 @@ int main(int argc, char **argv) {
         break;
     }
 
+#ifdef POPN_PROF
+    if (getenv("POPN_PROF")) prof_stop(getenv("POPN_PROF"));
+#endif
     if (g_headless) {
         printf("stopped: %s\n", rt.halt_reason);
         printf("frames %u functions %d dispatches %llu unwinds %llu interp_calls %llu interp_steps %llu\n",

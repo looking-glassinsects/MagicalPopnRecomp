@@ -121,6 +121,24 @@ uint32_t hw_interpret(HwRegs *r, uint32_t pc24, int forever, unsigned long long 
 
 /* ---- save states (whole hardware: RAM, VRAM, PPU, APU/DSP, DMA, timers) ---- */
 int hw_state_size(void) { return snes_saveState(g, NULL); }
+/* [widescreen] Which VRAM words the current room has drawn since it was set up (see
+ * wsVramEpoch) is not part of the console's state, so a save state carries it separately. Without
+ * it, narrow rooms show tiles left over from earlier rooms at the sides after a load. */
+#define WS_STATE_MAGIC 0x31455357u     /* "WSE1" */
+int hw_ws_state_size(void) { return 4 + 2 + 1 + (int)sizeof g->ppu->wsVramEpoch; }
+void hw_ws_state_save(uint8_t *buf) {
+    uint32_t m = WS_STATE_MAGIC; memcpy(buf, &m, 4);
+    memcpy(buf + 4, &g->ppu->wsEpoch, 2); buf[6] = g->ppu->wsInLoad;
+    memcpy(buf + 7, g->ppu->wsVramEpoch, sizeof g->ppu->wsVramEpoch);
+}
+int hw_ws_state_load(const uint8_t *buf, int size) {
+    uint32_t m;
+    if (size != hw_ws_state_size()) return 0;
+    memcpy(&m, buf, 4); if (m != WS_STATE_MAGIC) return 0;
+    memcpy(&g->ppu->wsEpoch, buf + 4, 2); g->ppu->wsInLoad = buf[6] != 0;
+    memcpy(g->ppu->wsVramEpoch, buf + 7, sizeof g->ppu->wsVramEpoch);
+    return 1;
+}
 int hw_save_state(uint8_t *buf) { return snes_saveState(g, buf); }
 int hw_load_state(uint8_t *buf, int size) {
     if (!snes_loadState(g, buf, size)) return 0;
@@ -147,9 +165,9 @@ void hw_get_pixels(uint8_t *px) { snes_setPixels(g, px); }
  * screens that don't use this layout: title, menus, cutscenes. */
 /* scrolled: the camera has moved since this scene's anchor was found. Cutscenes and menus
  * that happen to use the same map system never scroll, so they stay pillarboxed. */
-typedef struct { int delta; int locked; int first_h; int stride; int scrolled; int rdelta; int miss; } WsAnchor;
-static WsAnchor g_anchor[2] = {{-1, 0, -1, 0, 0, 0, 0}, {-1, 0, -1, 0, 0, 0, 0}};
-static void ws_reset_anchors(void) { for (int i = 0; i < 2; i++) { g_anchor[i].delta = -1; g_anchor[i].locked = 0; g_anchor[i].first_h = -1; g_anchor[i].stride = 0; g_anchor[i].scrolled = 0; g_anchor[i].miss = 0; } }
+typedef struct { int delta; int locked; int first_h; int stride; int scrolled; int rdelta; int miss; int map; } WsAnchor;
+static WsAnchor g_anchor[2] = {{-1, 0, -1, 0, 0, 0, 0, -1}, {-1, 0, -1, 0, 0, 0, 0, -1}};
+static void ws_reset_anchors(void) { for (int i = 0; i < 2; i++) { g_anchor[i].delta = -1; g_anchor[i].locked = 0; g_anchor[i].first_h = -1; g_anchor[i].stride = 0; g_anchor[i].scrolled = 0; g_anchor[i].miss = 0; g_anchor[i].map = -1; } }
 
 static int g_dbg_best, g_dbg_best_d, g_dbg_best_rd, g_dbg_total, g_dbg_nseen, g_dbg_odd;
 static int g_ws_failed; static char g_ws_fail_info[200];
@@ -215,6 +233,24 @@ static int ws_match(Ppu *ppu, int layer, const uint8_t *base, int stride, int ro
         g_dbg_nseen = nseen; g_dbg_odd = odd; g_dbg_best = -1; g_dbg_total = total;
         if (nseen < 4 || odd < 24) { a->locked = 0; return -1; }
     }
+    /* Steady scrolling: last frame's anchor nearly always still fits exactly. Score it first,
+     * and when every sampled tile matches, keep it without searching the whole map (the search
+     * is the single most expensive thing in a frame). This is the search's own answer: nothing
+     * can score higher than a perfect fit, and the search gives ties to the last anchor. */
+    if (a->delta >= 0 && a->stride == stride && a->map == map) {
+        int ok_rows = 1, score = 0;
+        for (int j = 0; j < NR && ok_rows; j++) { int r = lrow[j] + a->rdelta; if (r < 0 || r >= rows) ok_rows = 0; }
+        if (ok_rows) {
+            for (int j = 0; j < NR; j++)
+                score += ws_row_score(base, stride, w, lrow[j] + a->rdelta, mcj[j] + a->delta, pg[j], mcj[j] != mc0, vrow[j]);
+            if (score == total) {
+                g_dbg_best = score; g_dbg_best_d = a->delta; g_dbg_best_rd = a->rdelta;
+                a->locked = 1;
+                return a->delta;
+            }
+        }
+    }
+    a->map = map;
     /* the tilemap repeats every 32 rows, so tall rooms can sit at any multiple of 32 */
     for (int kk = -2; kk * 32 < rows; kk++) {
         int rd = 32 * kk;
@@ -533,6 +569,48 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
                     stable[l][i * 2] = (uint8_t)ov_tile[l][i]; stable[l][i * 2 + 1] = (uint8_t)(ov_tile[l][i] >> 8);
                 }
             }
+            /* A back layer whose level map is narrower than the room (a 512 px ring behind a wider
+             * playfield): rows the game hasn't decoded for this spot yet still hold another part of
+             * the area (a patch of a different wall), while the screen already shows the right
+             * tiles. Such a row is recognised by its on-screen part not matching the screen; its
+             * on-screen columns are then taken from the screen, and the rest of it from the
+             * screen's own repeating pattern, when the wall has one. Rows that match are left
+             * alone: their off-screen tiles are the real ones. */
+            if (l == 1 && stride == 64 && (s->ram[0x84] | (s->ram[0x85] << 8)) > 64) {
+                int ww = 32;
+                int hs = ppu->bgLayer[1].hScroll & 0x3ff, vs = ppu->bgLayer[1].vScroll & 0x3ff;
+                int mc = hs >> 4, r0 = vs >> 4;
+                uint16_t mp = ppu->bgLayer[1].tilemapAdr;
+#define VT(j, k) ppu->vram[(mp + ((r0 + (j)) & 31) * 32 + ((mc + (k)) & 31)) & 0x7fff]
+#define LV(r, k) (uint16_t)(base[((r) * ww + ((mc + (k) + d) % ww)) * 2] | (base[((r) * ww + ((mc + (k) + d) % ww)) * 2 + 1] << 8))
+                int per = -1;                                /* the wall's period on screen, in tiles (found when needed) */
+                for (int j = 0; j <= 14; j++) {
+                    int r = r0 + j + a->rdelta; if (r < 0 || r >= rows) continue;
+                    int match = 0;                           /* (edge columns may not be drawn yet: 1..15 only) */
+                    for (int k = 1; k <= 15; k++) match += LV(r, k) == VT(j, k);
+                    if (match >= 12) continue;
+                    if (per < 0) {
+                        per = 0;
+                        for (int P = 1; P <= 16 && !per; P++) {
+                            int n = 0, bad = 0;
+                            for (int jj = 1; jj <= 13; jj++)
+                                for (int k = 0; k + P <= 16; k++) { if (VT(jj, k) != VT(jj, k + P)) bad++; else n++; }
+                            if (n >= 12 && bad * 10 <= n) per = P;   /* (16 tiles: one pair per row on screen) */
+                        }
+                    }
+                    for (int k = -8; k <= 24; k++) {
+                        int kk = k;
+                        if (k < 0 || k > 16) {
+                            if (!per) continue;
+                            kk = ((k % per) + per) % per; if (kk == 0) kk = per < 16 ? per : 0;
+                        }
+                        int i = r * ww + ((mc + k + d) % ww + ww) % ww; uint16_t v = VT(j, kk);
+                        stable[l][i * 2] = (uint8_t)v; stable[l][i * 2 + 1] = (uint8_t)(v >> 8);
+                    }
+                }
+#undef LV
+#undef VT
+            }
             ppu->wsSrc[l].valid = true; ppu->wsSrc[l].base = stable[l]; ppu->wsSrc[l].stride = stride;
         }
         ppu->wsSrc[l].width = stride / 2; ppu->wsSrc[l].rows = rows; ppu->wsSrc[l].delta = d; ppu->wsSrc[l].rdelta = a->rdelta;
@@ -792,6 +870,32 @@ static int ip_lerp(int prev, int cur, int mod, int maxd, float t) {
     return (cur - (int)lroundf(d * (1.0f - t))) & (mod - 1);
 }
 
+/* Half-pixel pictures. A layer or sprite that moves 1 px per game frame can't be drawn half way
+ * in whole pixels, so the in-between picture is made twice as wide: its even columns come from
+ * a picture drawn with every half-way position rounded one way (phase 0) and its odd columns
+ * from one rounded the other way (phase 1). Something on a whole pixel is identical in both, so
+ * it keeps its exact shape; something half way across is drawn half a pixel over. */
+static int ip_off2(int prev, int cur, int mod, int maxd, float t, int *o2) {
+    int d = ((cur - prev + mod / 2) & (mod - 1)) - mod / 2;
+    if (d > maxd || d < -maxd) return 0;
+    *o2 = (int)lroundf(2.0f * d * (1.0f - t));       /* how far behind `cur`, in half pixels */
+    return 1;
+}
+#ifdef _MSC_VER
+#define HW_THREAD_LOCAL __declspec(thread)
+#else
+#define HW_THREAD_LOCAL __thread
+#endif
+static HW_THREAD_LOCAL int ip_half_seen;     /* this picture put something on a half pixel */
+/* a scroll register (content moves the other way): phase 0 rounds the scroll down */
+static int ip_scroll_ph(int prev, int cur, int mod, int maxd, float t, int phase) {
+    int o2;
+    if (phase < 0) return ip_lerp(prev, cur, mod, maxd, t);
+    if (!ip_off2(prev, cur, mod, maxd, t, &o2)) return cur;
+    ip_half_seen |= o2 & 1;
+    return (cur - ((o2 + 1) >> 1) + (phase ? (o2 & 1) : 0)) & (mod - 1);
+}
+
 /* How far each sprite of the current frame moved since the previous one.
  *
  * The game reshuffles OAM slots from frame to frame, so a piece is paired with sprites of the
@@ -927,7 +1031,7 @@ static void ip_sprite_motion(int xs[2][128], int ys[2][128], int sz[2][128], uin
 /* Draw the picture at fraction t (0..1) between `prev` and `cur` with PPU `p` (whose VRAM,
  * palette and widescreen sources are those of `cur`) into `out` (BGRX); returns its width.
  * p's registers, sprites and hooks are restored afterwards. */
-static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, uint8_t *out) {
+static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, int phase, uint8_t *out) {
     uint8_t regs[RG_SIZE]; uint16_t oam[0x100]; uint8_t high[0x20]; uint16_t cgram[0x100];
     memcpy(regs, (uint8_t *)p + RG_START, RG_SIZE);
     memcpy(cgram, p->cgram, sizeof cgram);
@@ -972,7 +1076,12 @@ static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, u
             int mdx = mdx_of[i], mdy = mdy_of[i], have = have_of[i];
             int x = xs[1][i], y = ys[1][i];
             if (have) {
-                x = (x - (int)lroundf(mdx * (1.0f - t))) & 511;
+                if (phase < 0) x = (x - (int)lroundf(mdx * (1.0f - t))) & 511;
+                else {                                   /* screen position: phase 0 rounds up */
+                    int o2 = (int)lroundf(2.0f * mdx * (1.0f - t));
+                    ip_half_seen |= o2 & 1;
+                    x = (x - (phase ? ((o2 + 1) >> 1) : (o2 >> 1))) & 511;
+                }
                 y = (y - (int)lroundf(mdy * (1.0f - t))) & 255;
             }
             int hb = (i * 2) & 7, byte = i >> 2;
@@ -990,7 +1099,7 @@ static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, u
             if (pr->mode == p->mode && !p->forcedBlank && !pr->forcedBlank)
                 for (int l = 0; l < 4; l++) {
                     if (p->mode == 7 && l == 0) continue;
-                    p->bgLayer[l].hScroll = (uint16_t)ip_lerp(pr->bgLayer[l].hScroll & 0x3ff, p->bgLayer[l].hScroll & 0x3ff, 1024, 64, t);
+                    p->bgLayer[l].hScroll = (uint16_t)ip_scroll_ph(pr->bgLayer[l].hScroll & 0x3ff, p->bgLayer[l].hScroll & 0x3ff, 1024, 64, t, phase);
                     p->bgLayer[l].vScroll = (uint16_t)ip_lerp(pr->bgLayer[l].vScroll & 0x3ff, p->bgLayer[l].vScroll & 0x3ff, 1024, 64, t);
                 }
         }
@@ -1019,7 +1128,7 @@ void hw_interp_dump(int a, int b) {
 /* On the live PPU, right after a frame (used by the headless test). */
 int hw_render_interp(float t, uint8_t *out) {
     if (g_ip[0]->mixed_blank) return ppu_putPixelsWide(g->ppu, out);   /* as hw_snapshot_render */
-    return ip_render(g->ppu, g_ip[0], g_ip[1], t, out);
+    return ip_render(g->ppu, g_ip[0], g_ip[1], t, -1, out);
 }
 
 /* ---- snapshots for the display thread: triple-buffered so neither side ever waits ---- */
@@ -1077,8 +1186,9 @@ int hw_snapshot_publish(double t0_ms) {
  * little behind the newest frame, and when one falls before it, the older snapshot has it,
  * so motion never stalls on a frame that arrived late and then jumps. Returns width, 0 = nothing. */
 volatile long hw_snap_clamps;
-int hw_snapshot_render(double when_ms, uint8_t *out) {
-    if (!g_snap_ready) return 0;
+/* the snapshot that covers `when_ms` and how far into its frame that moment is (NULL: none yet) */
+static IpSnap *snap_pick(double when_ms, double *tp) {
+    if (!g_snap_ready) return NULL;
     EnterCriticalSection(&g_snap_cs);
     if (g_snap_fresh) {
         int t = g_snap_older; g_snap_older = g_snap_front; g_snap_front = g_snap_latest; g_snap_latest = t;
@@ -1087,10 +1197,41 @@ int hw_snapshot_render(double when_ms, uint8_t *out) {
     LeaveCriticalSection(&g_snap_cs);
     const double F = 1000.0 / 60.0988;
     IpSnap *s = g_snap[g_snap_front], *o = g_snap[g_snap_older];
-    if (!s->valid) return 0;
+    if (!s->valid) return NULL;
     if (when_ms < s->t0 && o->valid && fabs(o->t0 - (s->t0 - F)) < 1.0) s = o;   /* the step before */
-    double t = (when_ms - s->t0) / F;
-    if (t < 0 || t > 1.0) hw_snap_clamps++;                  /* diagnostics: a frame wasn't there */
+    *tp = (when_ms - s->t0) / F;
+    if (*tp < 0 || *tp > 1.0) hw_snap_clamps++;              /* diagnostics: a frame wasn't there */
+    return s;
+}
+
+int hw_snapshot_render(double when_ms, uint8_t *out) {
+    double t;
+    IpSnap *s = snap_pick(when_ms, &t);
+    if (!s) return 0;
     if (t >= 0.999 || s->cur.mixed_blank) { memcpy(out, s->real, (size_t)s->real_w * 224 * 4); return s->real_w; }
-    return ip_render(&s->ppu, &s->cur, &s->prev, (float)(t < 0 ? 0 : t), out);
+    return ip_render(&s->ppu, &s->cur, &s->prev, (float)(t < 0 ? 0 : t), -1, out);
+}
+
+/* The same picture at half-pixel precision across: `out` (HW_FINE_MAX_W x 224) gets 2 x width
+ * columns; returns the width in game pixels, or 0. Display thread only. */
+volatile int hw_fine_on = 1;            /* the display thread turns half pixels off when they don't fit in time */
+int hw_snapshot_render_fine(double when_ms, uint8_t *out) {
+    static uint8_t a[HW_WIDE_MAX_W * 224 * 4], b[HW_WIDE_MAX_W * 224 * 4];
+    double t;
+    IpSnap *s = snap_pick(when_ms, &t);
+    if (!s) return 0;
+    int w;
+    const uint8_t *pa = a, *pb = b;
+    if (t >= 0.999 || s->cur.mixed_blank) { w = s->real_w; pa = pb = s->real; }
+    else {
+        float ft = (float)(t < 0 ? 0 : t);
+        ip_half_seen = 0;
+        w = ip_render(&s->ppu, &s->cur, &s->prev, ft, 0, a);
+        /* the second picture differs only where something sits half way: often nothing does */
+        if (!ip_half_seen || !hw_fine_on || ip_render(&s->ppu, &s->cur, &s->prev, ft, 1, b) != w) pb = a;
+    }
+    const uint32_t *ua = (const uint32_t *)pa, *ub = (const uint32_t *)pb;
+    uint32_t *uo = (uint32_t *)out;
+    for (int i = 0; i < w * 224; i++) { uo[i * 2] = ua[i]; uo[i * 2 + 1] = ub[i]; }
+    return w;
 }

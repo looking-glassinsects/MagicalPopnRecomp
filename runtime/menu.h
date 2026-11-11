@@ -19,4 +19,5 @@ void menu_draw(void *hdc, void *bits, int w, int h);   /* into a 32-bit top-down
 void menu_mouse_move(int x, int y);
 void menu_tick(void);              /* once per menu loop: the controller setup reads the controller */
 int  menu_pad_setup_active(void);  /* 1 while Controls > Set up controller waits for a button */
+void *menu_make_font(int px);       /* HFONT in the menu's typeface (the caller deletes it): corner messages use it too */
 void menu_panel_rect(void *rect);   /* RECT* out: area the last menu_draw painted */
