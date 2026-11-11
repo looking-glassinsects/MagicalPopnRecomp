@@ -82,8 +82,8 @@ int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "rb");
     if (!f) { fprintf(stderr, "cannot open ROM\n"); return 1; }
     fseek(f, 0, SEEK_END); long size = ftell(f); fseek(f, 0, SEEK_SET);
-    uint8_t *rom = malloc((size_t)size);
-    if (fread(rom, 1, (size_t)size, f) != (size_t)size) return 1;
+    uint8_t *rom = size > 0 ? malloc((size_t)size) : NULL;
+    if (!rom || fread(rom, 1, (size_t)size, f) != (size_t)size) { fprintf(stderr, "cannot read ROM\n"); fclose(f); return 1; }
     fclose(f);
 
     Snes *s = snes_init();

@@ -428,14 +428,14 @@ class FuncGen:
                     e("  rt_dispatch(c, t);")
                 e(f"  RET_CHECK(c, 0x{expect:06X}); }}")
                 return out, self.label(nxt_node) and nxt_node
+            # (the pointer is read once, into t: reading it again for the fallback would spend
+            # bus time the real instruction doesn't)
             if targets:
                 e("  switch (t) {")
                 for t in sorted(set(targets)):
                     e(f"  case 0x{t:06X}: goto {self.label((t, nm, nx, nphp))};")
-                e("  } }")
-            else:
                 e("  }")
-            e(f"rt_dispatch(c, canon24({tgt})); return;")
+            e("  rt_dispatch(c, t); return; }")
             return out, None
         if mn == "RTS":
             e(f"c->ret = 0x{pb:02X}0000u | (uint16_t)(pull16(c) + 1); return;")

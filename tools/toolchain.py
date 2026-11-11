@@ -102,7 +102,8 @@ class MSVC:
     def compile(self, sources, out_dir, includes=(), defines=(), opt=2, warnings=False, log=None,
                 progress=None, jobs=None):
         out_dir = pathlib.Path(out_dir)
-        flags = ["/nologo", "/c", f"/O{opt}", "/W3" if warnings else "/W0", "/wd4102", "/wd4244", "/utf-8",
+        flags = ["/nologo", "/c", f"/O{min(opt, 2)}",                         # cl has no /O3
+                 "/W3" if warnings else "/W0", "/wd4102", "/wd4244", "/utf-8",
                  "/bigobj", "/MP", "/D_CRT_SECURE_NO_WARNINGS", *[f"/I{i}" for i in includes],
                  *[f"/D{d}" for d in defines], f"/Fo{out_dir}\\"]
         sources = [str(s) for s in sources]

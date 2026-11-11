@@ -292,8 +292,21 @@ void ppu_handleFrameStart(Ppu* ppu) {
   ppu->evenFrame = !ppu->evenFrame;
 }
 
+// [recomp] Decoded tile rows, cached for the line being drawn. Eight neighbouring pixels on a
+// line come from the same row of the same tile, so its planes are read and unpacked once, not
+// per pixel. The cache is per thread (the display thread draws with its own Ppu at the same
+// time) and is emptied at the start of every line, so a VRAM write between lines can't be missed.
+#ifdef _MSC_VER
+#define PPU_THREAD_LOCAL __declspec(thread)
+#else
+#define PPU_THREAD_LOCAL __thread
+#endif
+static PPU_THREAD_LOCAL unsigned tileGen;
+static PPU_THREAD_LOCAL struct { unsigned gen; uint32_t key; uint8_t px[8]; } tileCache[4];
+
 void ppu_runLine(Ppu* ppu, int line) {
   // called for lines 1-224/239
+  tileGen++; // [recomp] new line: the tile cache starts empty
   if(ppu->lineHook) ppu->lineHook(ppu, line, ppu->lineUser); // [recomp]
   // evaluate sprites
   memset(ppu->objPixelBuffer, 0, sizeof(ppu->objPixelBuffer));
@@ -385,6 +398,16 @@ void ppu_setPixelOutputFormat(Ppu* ppu, int pixelOutputFormat) {
   ppu->pixelOutputFormat = pixelOutputFormat;
 }
 
+// [recomp] a 5-bit colour channel at each of the 16 brightness levels, as an 8-bit value
+// (exactly ((v << 3) | (v >> 2)) * brightness / 15, worked out once)
+static uint8_t brightTable[16][32];
+static bool brightTableReady;
+static void ppu_makeBrightTable(void) {
+  for(int br = 0; br < 16; br++)
+    for(int v = 0; v < 32; v++) brightTable[br][v] = (uint8_t) (((v << 3) | (v >> 2)) * br / 15);
+  brightTableReady = true;
+}
+
 static void ppu_handlePixel(Ppu* ppu, int x, int y) {
   int r = 0, r2 = 0;
   int g = 0, g2 = 0;
@@ -449,16 +472,21 @@ ws_store:;
   int row = (y - 1) + (ppu->evenFrame ? 0 : 239);
   // [widescreen] one pixel per dot for the wide output
   uint8_t* ws = &ppu->wsBuffer[row * PPU_WS_PITCH + (x + PPU_WS_MAX) * 4];
-  ws[0 + ppu->pixelOutputFormat] = ((b << 3) | (b >> 2)) * ppu->brightness / 15;
-  ws[1 + ppu->pixelOutputFormat] = ((g << 3) | (g >> 2)) * ppu->brightness / 15;
-  ws[2 + ppu->pixelOutputFormat] = ((r << 3) | (r >> 2)) * ppu->brightness / 15;
+  if(!brightTableReady) ppu_makeBrightTable();
+  const uint8_t* bt = brightTable[ppu->brightness & 15];
+  int fmt = ppu->pixelOutputFormat;
+  uint8_t ob = bt[b & 31], og = bt[g & 31], or_ = bt[r & 31];
+  ws[0 + fmt] = ob;
+  ws[1 + fmt] = og;
+  ws[2 + fmt] = or_;
   if(x < 0 || x > 255) return;
-  ppu->pixelBuffer[row * 2048 + x * 8 + 0 + ppu->pixelOutputFormat] = ((b2 << 3) | (b2 >> 2)) * ppu->brightness / 15;
-  ppu->pixelBuffer[row * 2048 + x * 8 + 1 + ppu->pixelOutputFormat] = ((g2 << 3) | (g2 >> 2)) * ppu->brightness / 15;
-  ppu->pixelBuffer[row * 2048 + x * 8 + 2 + ppu->pixelOutputFormat] = ((r2 << 3) | (r2 >> 2)) * ppu->brightness / 15;
-  ppu->pixelBuffer[row * 2048 + x * 8 + 4 + ppu->pixelOutputFormat] = ((b << 3) | (b >> 2)) * ppu->brightness / 15;
-  ppu->pixelBuffer[row * 2048 + x * 8 + 5 + ppu->pixelOutputFormat] = ((g << 3) | (g >> 2)) * ppu->brightness / 15;
-  ppu->pixelBuffer[row * 2048 + x * 8 + 6 + ppu->pixelOutputFormat] = ((r << 3) | (r >> 2)) * ppu->brightness / 15;
+  uint8_t* pb = &ppu->pixelBuffer[row * 2048 + x * 8 + fmt];
+  pb[0] = bt[b2 & 31];
+  pb[1] = bt[g2 & 31];
+  pb[2] = bt[r2 & 31];
+  pb[4] = ob;
+  pb[5] = og;
+  pb[6] = or_;
 }
 
 static int ppu_getPixel(Ppu* ppu, int x, int y, bool sub, int* r, int* g, int* b) {
@@ -668,28 +696,26 @@ static int ppu_decodeBgTile(Ppu* ppu, uint16_t tile, int x, int y, int layer, bo
   // read tiledata, ajust palette for mode 0
   int bitDepth = bitDepthsPerMode[ppu->mode][layer];
   if(ppu->mode == 0) paletteNum += 8 * layer;
-  // plane 1 (always)
-  int paletteSize = 4;
-  uint16_t plane1 = ppu->vram[(ppu->bgLayer[layer].tileAdr + ((tileNum & 0x3ff) * 4 * bitDepth) + row) & 0x7fff];
-  int pixel = (plane1 >> col) & 1;
-  pixel |= ((plane1 >> (8 + col)) & 1) << 1;
-  // plane 2 (for 4bpp, 8bpp)
-  if(bitDepth > 2) {
-    paletteSize = 16;
-    uint16_t plane2 = ppu->vram[(ppu->bgLayer[layer].tileAdr + ((tileNum & 0x3ff) * 4 * bitDepth) + 8 + row) & 0x7fff];
-    pixel |= ((plane2 >> col) & 1) << 2;
-    pixel |= ((plane2 >> (8 + col)) & 1) << 3;
+  int paletteSize = bitDepth > 4 ? 256 : bitDepth > 2 ? 16 : 4;
+  // [recomp] the row's eight pixels, from the cache when this line already decoded this row
+  uint32_t planeAdr = (ppu->bgLayer[layer].tileAdr + ((tileNum & 0x3ff) * 4 * bitDepth) + row) & 0x7fff;
+  uint32_t key = planeAdr | ((uint32_t) bitDepth << 16);
+  uint8_t* px = tileCache[layer].px;
+  if(tileCache[layer].gen != tileGen || tileCache[layer].key != key) {
+    tileCache[layer].gen = tileGen; tileCache[layer].key = key;
+    uint16_t plane1 = ppu->vram[planeAdr];
+    uint16_t plane2 = bitDepth > 2 ? ppu->vram[(planeAdr + 8) & 0x7fff] : 0;
+    uint16_t plane3 = bitDepth > 4 ? ppu->vram[(planeAdr + 16) & 0x7fff] : 0;
+    uint16_t plane4 = bitDepth > 4 ? ppu->vram[(planeAdr + 24) & 0x7fff] : 0;
+    for(int c = 0; c < 8; c++) {
+      int v = ((plane1 >> c) & 1) | (((plane1 >> (8 + c)) & 1) << 1)
+            | (((plane2 >> c) & 1) << 2) | (((plane2 >> (8 + c)) & 1) << 3)
+            | (((plane3 >> c) & 1) << 4) | (((plane3 >> (8 + c)) & 1) << 5)
+            | (((plane4 >> c) & 1) << 6) | (((plane4 >> (8 + c)) & 1) << 7);
+      px[c] = (uint8_t) v;
+    }
   }
-  // plane 3 & 4 (for 8bpp)
-  if(bitDepth > 4) {
-    paletteSize = 256;
-    uint16_t plane3 = ppu->vram[(ppu->bgLayer[layer].tileAdr + ((tileNum & 0x3ff) * 4 * bitDepth) + 16 + row) & 0x7fff];
-    pixel |= ((plane3 >> col) & 1) << 4;
-    pixel |= ((plane3 >> (8 + col)) & 1) << 5;
-    uint16_t plane4 = ppu->vram[(ppu->bgLayer[layer].tileAdr + ((tileNum & 0x3ff) * 4 * bitDepth) + 24 + row) & 0x7fff];
-    pixel |= ((plane4 >> col) & 1) << 6;
-    pixel |= ((plane4 >> (8 + col)) & 1) << 7;
-  }
+  int pixel = px[col];
   // return cgram index, or 0 if transparent, palette number in bits 10-8 for 8-color layers
   return pixel == 0 ? 0 : paletteSize * paletteNum + pixel;
 }

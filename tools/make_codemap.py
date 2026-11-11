@@ -21,7 +21,6 @@ import zlib
 
 TOOLS = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))
-import msvc                                    # noqa: E402
 import snes                                    # noqa: E402
 import pipeline as P                           # noqa: E402
 from disasm65816 import read_entries           # noqa: E402
