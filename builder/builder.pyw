@@ -89,7 +89,12 @@ def load_prefs():
         return {"lang": lang, "rom": "", "out": str(APP_DIR / "MagicalPopn")}
 
 
+PERSIST = True      # False while updating a game: that run's ROM and folder aren't the user's choices
+
+
 def save_prefs(p):
+    if not PERSIST:
+        return
     PREFS.parent.mkdir(parents=True, exist_ok=True)
     PREFS.write_text(json.dumps(p, indent=1, ensure_ascii=False), encoding="utf-8")
 
@@ -135,11 +140,16 @@ def enable_file_drop(root, callback):
 
 
 class App:
-    def __init__(self, root, initial_rom=None):
+    def __init__(self, root, initial_rom=None, out_dir=None, update=False):
         self.root = root
         self.prefs = load_prefs()
         if initial_rom:
             self.prefs["rom"] = initial_rom
+        if out_dir:
+            self.prefs["out"] = out_dir
+        # update mode (started by the game's "update now"): build the given ROM into the game's
+        # folder, then delete that copy of the ROM, start the game and close
+        self.update_mode = update
         self.q = queue.Queue()
         self.worker = None
         self.cancel_flag = False
@@ -403,6 +413,13 @@ class App:
                         self.result = msg[1]
                         self.progress["value"] = 1.0
                         self.status.config(text=f"{self.t('done')}   ({msg[1]['routines']} {self.t('routines')})")
+                        if self.update_mode:
+                            try:
+                                os.remove(self.prefs["rom"])
+                            except OSError:
+                                pass
+                            self.play()
+                            self.root.after(400, self.root.destroy)
                     elif kind == "cancelled":
                         self.status.config(text=self.t("cancelled"))
                     elif msg[1] == self.t("not_writable"):
@@ -433,8 +450,23 @@ def main():
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
+    # Builder.exe [ROM] [--out FOLDER] [--update]
+    global PERSIST
+    rom = out_dir = None
+    update = False
+    args = sys.argv[1:]
+    while args:
+        a = args.pop(0)
+        if a == "--out" and args:
+            out_dir = args.pop(0)
+        elif a == "--update":
+            update = True
+        elif rom is None and not a.startswith("--"):
+            rom = a
+    update = update and bool(rom and out_dir)
+    PERSIST = not update
     root = tk.Tk()
-    App(root, sys.argv[1] if len(sys.argv) > 1 else None)
+    App(root, rom, out_dir, update)
     root.mainloop()
 
 

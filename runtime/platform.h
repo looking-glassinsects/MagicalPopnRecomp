@@ -39,4 +39,5 @@ double   plat_now_ms(void);
 void     plat_sleep_until_ms(double t);         /* precise wait (sleep, then spin the last ~1 ms) */
 void     plat_note_emulated_frame(void);
 void     plat_message(const char *title_utf8, const char *text_utf8);
+int      plat_ask(const char *title_utf8, const char *text_utf8);      /* Yes / No box; 1 = yes */
 void     plat_exe_dir(char *out, int size);

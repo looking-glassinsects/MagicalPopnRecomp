@@ -13,7 +13,7 @@ import sys
 import msvc
 
 NOWIN = 0x08000000 if os.name == "nt" else 0
-LIBS = ["user32", "gdi32", "winmm", "xinput", "opengl32", "ole32", "hid"]
+LIBS = ["user32", "gdi32", "winmm", "xinput", "opengl32", "ole32", "hid", "winhttp"]
 
 
 def _app_dir():

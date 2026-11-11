@@ -4,7 +4,8 @@ enum { MA_NONE, MA_RESUME, MA_RESET, MA_QUIT, MA_SCREENSHOT, MA_SAVE, MA_LOAD };
 
 /* UI strings (English / Japanese) used outside the menu too */
 enum { T_TOAST_SCREENSHOT, T_TOAST_WELCOME, T_TOAST_FF, T_PAUSED, T_ERROR_TITLE, T_RESET_DONE,
-       T_SAVED, T_LOADED, T_NO_STATE, T_RESUMED, T_SLOT, T_EMPTY, T_SAVE_FAILED, T_PAD_CONNECTED, T_COUNT };
+       T_SAVED, T_LOADED, T_NO_STATE, T_RESUMED, T_SLOT, T_EMPTY, T_SAVE_FAILED, T_PAD_CONNECTED,
+       T_UPDATE_ASK, T_UPDATE_PROGRESS, T_UPDATE_FAILED, T_COUNT };
 const char *tr(int id);
 
 /* provided by main.c: "14:32" style label for a save slot, or "" if empty */

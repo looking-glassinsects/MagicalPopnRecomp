@@ -19,6 +19,7 @@
 #include "settings.h"
 #include "menu.h"
 #include "png_write.h"
+#include "update.h"
 #include "gen.h"
 
 enum { EXIT_QUIT = 2, EXIT_RESET = 4, EXIT_LOAD = 5 };
@@ -52,7 +53,7 @@ typedef struct StateHeader {
 
 static int g_capture_slot;          /* 0 = auto (continue), 1..9 = slots, -1 = test file */
 static int g_quit_after_capture, g_quit_wait;
-static uint8_t *g_load_buf; static int g_load_size, g_load_slot;
+static uint8_t *g_load_buf; static int g_load_slot;
 static char g_test_state[MAX_PATH + 32];
 
 static void slot_path(int slot, char *out, int size) {
@@ -106,13 +107,13 @@ static int read_state(int slot) {
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-    uint8_t *b = malloc(n > 0 ? n : 1);
-    int ok = n > (long)sizeof(StateHeader) && fread(b, 1, n, f) == (size_t)n;
+    uint8_t *b = n > (long)sizeof(StateHeader) ? malloc((size_t)n) : NULL;
+    int ok = b && fread(b, 1, (size_t)n, f) == (size_t)n;
     fclose(f);
     StateHeader *h = (StateHeader *)b;
     if (!ok || memcmp(h->magic, "MPOPNST1", 8) || memcmp(h->rom_sha1, GEN_ROM_SHA1, 40) ||
         sizeof(StateHeader) + h->hw_size != (size_t)n) { free(b); return 0; }
-    free(g_load_buf); g_load_buf = b; g_load_size = (int)n; g_load_slot = slot;
+    free(g_load_buf); g_load_buf = b; g_load_slot = slot;
     return 1;
 }
 
@@ -442,17 +443,17 @@ static void on_vblank_headless(void) {
         }
     }
     {   /* debug: POPN_INPUT="FROM-TO:MASK,..." holds buttons (BTN_* bit mask, hex) on those frames */
-        static int init, n; static unsigned from[64], to[64], mask[64];
+        static int init, ni; static unsigned from[64], to[64], mask[64];
         if (!init) {
             init = 1;
             const char *p = getenv("POPN_INPUT");
-            while (p && *p && n < 64 && sscanf(p, "%u-%u:%x", &from[n], &to[n], &mask[n]) == 3) {
-                n++; p = strchr(p, ','); if (p) p++;
+            while (p && *p && ni < 64 && sscanf(p, "%u-%u:%x", &from[ni], &to[ni], &mask[ni]) == 3) {
+                ni++; p = strchr(p, ','); if (p) p++;
             }
         }
-        if (n) {
+        if (ni) {
             unsigned m = 0;
-            for (int i = 0; i < n; i++) if (g_frames_run >= from[i] && g_frames_run <= to[i]) m |= mask[i];
+            for (int i = 0; i < ni; i++) if (g_frames_run >= from[i] && g_frames_run <= to[i]) m |= mask[i];
             hw_set_buttons((uint16_t)m);
         }
     }
@@ -541,6 +542,11 @@ static void on_vblank_headless(void) {
             memcpy(prevf, curf, (size_t)w * 224 * 4); prevw = w;
             if (g_frames_run + 1 >= g_max_frames) { fprintf(rep, "# checked %u, t=1 mismatches %u\n", checked, bad1); fflush(rep); }
         }
+    }
+    {   /* debug: POPN_SAVE_AT="FRAME,FILE" saves a state to FILE at that frame (works with --load-state) */
+        static int at = -2; static char file[MAX_PATH];
+        if (at == -2) { const char *e = getenv("POPN_SAVE_AT"); at = -1; if (e && sscanf(e, "%d,%259[^\n]", &at, file) != 2) at = -1; }
+        if (at >= 0 && (int)g_frames_run == at) { snprintf(g_test_state, sizeof g_test_state, "%s", file); request_save(-1); }
     }
     if (g_state_test && g_frames_run == g_state_test) request_save(-1);
     if (g_state_test && g_frames_run == g_state_test + 180) {
@@ -649,6 +655,29 @@ static void run_pause(void) {
     g_next_t = plat_now_ms(); g_exit_t = 0;
 }
 
+/* A newer release was found: ask, then download the new builder (progress in the corner) and
+ * hand over to it. It rebuilds the game from the embedded ROM into this folder and restarts it. */
+static void offer_update(const char *version) {
+    char text[1024];
+    audio_clear();
+    snprintf(text, sizeof text, tr(T_UPDATE_ASK), version);
+    if (getenv("POPN_UPDATE_AUTO") /* test: no question */ || plat_ask(tr(T_ERROR_TITLE), text)) {
+        update_begin();
+        int p;
+        for (int tick = 0; (p = update_progress()) >= 0 && p < 100; tick++) {
+            if (!plat_pump()) { quit_game(); return; }
+            (void)plat_take_flags();
+            if (tick % 10 == 0) { char b[128]; snprintf(b, sizeof b, tr(T_UPDATE_PROGRESS), p); plat_toast(b); }
+            plat_redraw();
+            Sleep(30);
+        }
+        if (p == 100 && update_launch()) { quit_game(); return; }
+        plat_message(tr(T_ERROR_TITLE), tr(T_UPDATE_FAILED));
+    }
+    plat_clear_keys();
+    g_next_t = plat_now_ms(); g_exit_t = 0;
+}
+
 /* Runs at the start of every vblank: the frame is complete and the game's controller read
  * comes right after this returns. Present first, wait as late as possible, then read input. */
 static void on_vblank_window(void) {
@@ -734,6 +763,7 @@ presented:
     }
     if (flags & PF_MENU) run_menu();
     if (flags & PF_PAUSE) run_pause();
+    { char ver[32]; if (!g_quit_after_capture && update_available(ver, sizeof ver)) offer_update(ver); }
     static int bg_save_frame = -1;
     if (g_set.pause_unfocused && !plat_focused() && g_set.resume && bg_save_frame < 0 && !g_quit_after_capture) {
         request_save(0);                 /* save your place first; pause from the next frame on */
@@ -752,16 +782,16 @@ presented:
     hw_set_buttons(plat_buttons());                     /* latched by the game right after this */
     {   /* debug: POPN_LIVE_INPUT="FROM-TO:MASK,..." scripted buttons in the window too, and
          * POPN_LIVE_FRAMES=N quits after N frames */
-        static int init, n, quit_at; static unsigned from[64], to[64], mask[64];
+        static int init, ni, quit_at; static unsigned from[64], to[64], mask[64];
         if (!init) {
             init = 1;
             const char *p = getenv("POPN_LIVE_INPUT");
-            while (p && *p && n < 64 && sscanf(p, "%u-%u:%x", &from[n], &to[n], &mask[n]) == 3) { n++; p = strchr(p, ','); if (p) p++; }
+            while (p && *p && ni < 64 && sscanf(p, "%u-%u:%x", &from[ni], &to[ni], &mask[ni]) == 3) { ni++; p = strchr(p, ','); if (p) p++; }
             p = getenv("POPN_LIVE_FRAMES"); quit_at = p ? atoi(p) : 0;
         }
-        if (n) {
+        if (ni) {
             unsigned m = 0;
-            for (int i = 0; i < n; i++) if (g_frames_run >= from[i] && g_frames_run <= to[i]) m |= mask[i];
+            for (int i = 0; i < ni; i++) if (g_frames_run >= from[i] && g_frames_run <= to[i]) m |= mask[i];
             hw_set_buttons((uint16_t)m);
         }
         if (quit_at && (int)g_frames_run >= quit_at) { snprintf(rt.halt_reason, sizeof rt.halt_reason, "quit"); longjmp(rt.exit_jmp, EXIT_QUIT); }
@@ -847,6 +877,8 @@ int main(int argc, char **argv) {
         g_next_t = plat_now_ms();
         if (g_set.resume && read_state(0)) plat_toast(tr(T_RESUMED));
         else plat_toast(tr(T_TOAST_WELCOME));
+        update_init(GEN_VERSION, g_dir, rom, rom_size);
+        if (g_set.check_updates) update_check();
     }
 
     if (g_load_state_arg) {

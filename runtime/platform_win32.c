@@ -54,7 +54,6 @@ void plat_exe_dir(char *out, int size) {
 
 double plat_now_ms(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart * 1000.0 / g_freq.QuadPart; }
 
-static HANDLE g_timer;   /* high-resolution waitable timer (Windows 10 1803+), else Sleep */
 #ifdef _MSC_VER
 #define THREAD_LOCAL __declspec(thread)
 #else
@@ -68,16 +67,16 @@ void plat_sleep_until_ms(double t) {
         t_timer_made = 1;
         t_timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
     }
-    HANDLE g_timer = t_timer;
+    HANDLE timer = t_timer;   /* high-resolution waitable timer (Windows 10 1803+), else Sleep */
     for (;;) {
         double left = t - plat_now_ms();
         if (left <= 0) return;
         if (left > 1.2) {
             double ms = left - 1.0;
-            if (g_timer) {
+            if (timer) {
                 LARGE_INTEGER due; due.QuadPart = -(LONGLONG)(ms * 10000.0);
-                SetWaitableTimer(g_timer, &due, 0, NULL, NULL, FALSE);
-                WaitForSingleObject(g_timer, INFINITE);
+                SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE);
+                WaitForSingleObject(timer, INFINITE);
             } else Sleep((DWORD)ms);
         } else YieldProcessor();          /* spin the last ~1 ms for precision */
     }
@@ -150,7 +149,6 @@ static GLuint make_tex(int w, int h, int linear) {
 int plat_init(const char *title) {
     QueryPerformanceFrequency(&g_freq);
     timeBeginPeriod(1);
-    g_timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
     HINSTANCE inst = GetModuleHandleW(NULL);
     WNDCLASSW wc = {0};
     wc.style = CS_OWNDC;
@@ -207,7 +205,6 @@ int plat_init(const char *title) {
 void plat_shutdown(void) {
     plat_display_thread(NULL);
     timeEndPeriod(1);
-    if (g_timer) CloseHandle(g_timer);
     if (g_gl) { wglMakeCurrent(NULL, NULL); wglDeleteContext(g_gl); }
     if (g_wnd) DestroyWindow(g_wnd);
 }
@@ -861,4 +858,11 @@ void plat_message(const char *title, const char *text) {
     MultiByteToWideChar(CP_UTF8, 0, title, -1, t, 128);
     MultiByteToWideChar(CP_UTF8, 0, text, -1, m, 1024);
     MessageBoxW(g_wnd, m, t, MB_OK | MB_ICONINFORMATION);
+}
+
+int plat_ask(const char *title, const char *text) {
+    wchar_t t[128], m[1024];
+    MultiByteToWideChar(CP_UTF8, 0, title, -1, t, 128);
+    MultiByteToWideChar(CP_UTF8, 0, text, -1, m, 1024);
+    return MessageBoxW(g_wnd, m, t, MB_YESNO | MB_ICONINFORMATION) == IDYES;
 }

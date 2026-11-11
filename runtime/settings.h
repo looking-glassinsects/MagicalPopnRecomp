@@ -29,6 +29,7 @@ typedef struct Settings {
     int mute_unfocused;
     int resume;           /* continue where you left off when starting the game */
     int slot;             /* save state slot 1..9 */
+    int check_updates;    /* look for a new release when the game starts */
     int win_x, win_y;     /* last window position (-32000 = let Windows choose) */
 } Settings;
 

@@ -31,7 +31,7 @@ enum {
     S_BTN_UP, S_BTN_DOWN, S_BTN_LEFT, S_BTN_RIGHT, S_BTN_A, S_BTN_B, S_BTN_X, S_BTN_Y, S_BTN_L, S_BTN_R,
     S_BTN_START, S_BTN_SELECT,
     S_PAD, S_PAD_SETUP, S_PAD_NONE, S_PAD_DONE, S_PAD_NOPAD, S_PAD_HINT,
-    S_PAD_B, S_PAD_A, S_PAD_Y, S_PAD_X, S_PAD_FF, S_PAD_MENU, S_COUNT
+    S_PAD_B, S_PAD_A, S_PAD_Y, S_PAD_X, S_PAD_FF, S_PAD_MENU, S_UPDATES, S_COUNT
 };
 
 static const char *STR[S_COUNT][LANG_COUNT] = {
@@ -97,6 +97,7 @@ static const char *STR[S_COUNT][LANG_COUNT] = {
     {"B (bottom)", "B（下）"}, {"A (right)", "A（右）"}, {"Y (left)", "Y（左）"}, {"X (top)", "X（上）"},
     {"Fast-forward (hold)", "早送り（長押し）"},
     {"Open the menu", "メニューを開く"},
+    {"Check for updates", "アップデートの確認"},
 };
 
 static const char *TSTR[T_COUNT][LANG_COUNT] = {
@@ -114,6 +115,13 @@ static const char *TSTR[T_COUNT][LANG_COUNT] = {
     {"empty", "空き"},
     {"Could not save slot %d", "スロット%dにセーブできませんでした"},
     {"Controller connected: %s", "コントローラー接続: %s"},
+    {"Version %s of Magical Pop'n Recomp is available.\n\nUpdate now? The new version is downloaded (about 90 MB), "
+     "the game is rebuilt (a minute or two) and then starts again. Your saves and settings are kept.",
+     "Magical Pop'n Recomp のバージョン %s が利用できます。\n\n今すぐアップデートしますか？ 新しいバージョンをダウンロード（約90MB）して"
+     "ゲームをビルドし直し（1～2分）、自動で再起動します。セーブと設定はそのまま残ります。"},
+    {"Downloading the update   %d%%", "アップデートをダウンロード中   %d%%"},
+    {"The update could not be downloaded. Please check your internet connection, or get the new version from the project's GitHub page.",
+     "アップデートをダウンロードできませんでした。インターネット接続を確認するか、GitHubのページから新しいバージョンを入手してください。"},
 };
 
 static const char *S(int id) { return STR[id][g_set.language]; }
@@ -122,7 +130,7 @@ const char *tr(int id) { return TSTR[id][g_set.language]; }
 /* ---------------------------------------------------------------- items */
 enum { PG_MAIN, PG_VIDEO, PG_AUDIO, PG_KEYS, PG_COUNT };
 enum {
-    I_RESUME, I_SAVE, I_LOAD, I_SLOT, I_CONTINUE, I_PG_VIDEO, I_PG_AUDIO, I_PG_KEYS, I_LANGUAGE,
+    I_RESUME, I_SAVE, I_LOAD, I_SLOT, I_CONTINUE, I_PG_VIDEO, I_PG_AUDIO, I_PG_KEYS, I_LANGUAGE, I_UPDATES,
     I_SCREENSHOT, I_RESET, I_QUIT, I_BACK,
     I_SCALE, I_FULLSCREEN, I_VSYNC, I_LOWLAT, I_MOTION, I_WIDESCREEN, I_PIXEL, I_INTEGER, I_SMOOTH, I_SCANLINES, I_SPRLIMIT, I_SHOWFPS,
     I_VOLUME, I_MUTE, I_MUTE_BG, I_PAUSE_BG,
@@ -140,6 +148,8 @@ static const char *NOTE[][LANG_COUNT] = {
     [I_PG_AUDIO] = {"Volume and background behaviour.", "音量と非アクティブ時の動作。"},
     [I_PG_KEYS] = {"Change keyboard keys and fast-forward speed.", "キー割り当てと早送り速度。"},
     [I_LANGUAGE] = {"Menu language. The game's own text comes from your ROM.", "メニューの言語。ゲーム内の文章はROMによります。"},
+    [I_UPDATES] = {"When the game starts, look for a new version and offer to install it.",
+                   "ゲームの起動時に新しいバージョンを確認し、あればアップデートできます。"},
     [I_SCREENSHOT] = {"Saved to the screenshots folder (F12).", "screenshots フォルダに保存します (F12)。"},
     [I_RESET] = {"Restart the game from the beginning.", "ゲームを最初からやり直します。"},
     [I_QUIT] = {"Your place is kept when Continue on launch is On.", "「起動時に続きから」がオンなら続きから再開できます。"},
@@ -172,7 +182,7 @@ static const char *NOTE[][LANG_COUNT] = {
 };
 
 static int is_option(int id) {
-    return id == I_SLOT || id == I_CONTINUE || id == I_LANGUAGE || (id >= I_SCALE && id <= I_PAUSE_BG) || id == I_FFSPEED;
+    return id == I_SLOT || id == I_CONTINUE || id == I_LANGUAGE || id == I_UPDATES || (id >= I_SCALE && id <= I_PAUSE_BG) || id == I_FFSPEED;
 }
 static int is_subpage(int id) { return id == I_PG_VIDEO || id == I_PG_AUDIO || id == I_PG_KEYS; }
 
@@ -216,7 +226,7 @@ static int page_items(int page, int *out) {
     switch (page) {
     case PG_MAIN:
         out[n++] = I_RESUME; out[n++] = I_SAVE; out[n++] = I_LOAD; out[n++] = I_SLOT; out[n++] = I_CONTINUE;
-        out[n++] = I_PG_VIDEO; out[n++] = I_PG_AUDIO; out[n++] = I_PG_KEYS; out[n++] = I_LANGUAGE;
+        out[n++] = I_PG_VIDEO; out[n++] = I_PG_AUDIO; out[n++] = I_PG_KEYS; out[n++] = I_LANGUAGE; out[n++] = I_UPDATES;
         out[n++] = I_SCREENSHOT; out[n++] = I_RESET; out[n++] = I_QUIT; break;
     case PG_VIDEO:
         out[n++] = I_SCALE; out[n++] = I_FULLSCREEN; out[n++] = I_VSYNC; out[n++] = I_LOWLAT; out[n++] = I_MOTION; out[n++] = I_WIDESCREEN;
@@ -256,6 +266,7 @@ static const char *label_of(int id) {
     case I_PG_AUDIO: return S(S_PG_AUDIO);
     case I_PG_KEYS: return S(S_PG_KEYS);
     case I_LANGUAGE: return S(S_LANGUAGE);
+    case I_UPDATES: return S(S_UPDATES);
     case I_SCREENSHOT: return S(S_SCREENSHOT);
     case I_RESET: return S(S_RESET);
     case I_QUIT: return S(S_QUIT);
@@ -296,6 +307,7 @@ static void value_of(int id, char *v, int size) {
     }
     case I_CONTINUE: snprintf(v, size, "%s", onoff[g_set.resume]); break;
     case I_LANGUAGE: snprintf(v, size, "%s", g_set.language == LANG_JA ? "日本語" : "English"); break;
+    case I_UPDATES: snprintf(v, size, "%s", onoff[g_set.check_updates]); break;
     case I_SCALE: snprintf(v, size, "%dx", g_set.scale); break;
     case I_FULLSCREEN: snprintf(v, size, "%s", S(g_set.fullscreen ? S_FULLSCREEN : S_WINDOWED)); break;
     case I_VSYNC: snprintf(v, size, "%s", onoff[g_set.vsync]); break;
@@ -342,6 +354,7 @@ static void change(int id, int d) {
     case I_SLOT: g_set.slot = cycle(g_set.slot - 1, 9, d) + 1; break;
     case I_CONTINUE: g_set.resume = !g_set.resume; break;
     case I_LANGUAGE: g_set.language = cycle(g_set.language, LANG_COUNT, d); break;
+    case I_UPDATES: g_set.check_updates = !g_set.check_updates; break;
     case I_SCALE: g_set.scale = clampi(g_set.scale + d, 1, 6); if (g_set.fullscreen) g_set.fullscreen = 0; plat_apply_display(); break;
     case I_FULLSCREEN: g_set.fullscreen = !g_set.fullscreen; plat_apply_display(); break;
     case I_VSYNC: g_set.vsync = !g_set.vsync; break;

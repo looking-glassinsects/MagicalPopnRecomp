@@ -5,7 +5,7 @@
      recording every routine and register-width state the game really uses
   3. trace all code statically from those entries (+ pointer harvesting)
   4. emit C for every routine
-  5. compile + link with MSVC, embedding the ROM and icon as resources
+  5. compile + link (bundled clang, or MSVC), embedding the ROM and icon as resources
   6. smoke-test the result headless
 
 CLI:  python tools/pipeline.py ROM [--out DIR]
@@ -39,8 +39,11 @@ LAKESNES = REPO / "third_party" / "LakeSnes" / "snes"
 LAKESNES_SRC = ["snes.c", "snes_other.c", "cpu.c", "apu.c", "spc.c", "dsp.c", "dma.c", "ppu.c", "cart.c",
                 "input.c", "statehandler.c"]
 RUNTIME = REPO / "runtime"
-RUNTIME_SRC = ["main.c", "rt.c", "hw.c", "platform_win32.c", "pad_win32.c", "menu.c", "settings.c", "audio_wasapi.c"]
+RUNTIME_SRC = ["main.c", "rt.c", "hw.c", "platform_win32.c", "pad_win32.c", "menu.c", "settings.c", "audio_wasapi.c", "update_win32.c"]
 PIPELINE_VERSION = 3
+# This version of the project. A release is tagged "v" + VERSION; the game compares its own
+# VERSION with the newest release's tag to offer an update (runtime/update_win32.c).
+VERSION = "0.9.4.1"
 
 SESSIONS = [("attract", 1, 7200), ("menus", 1, 14400), ("menus", 2, 14400)] + \
            [("play", s, 43200) for s in range(1, 13)]
@@ -245,6 +248,8 @@ def build(rom_path, out_dir=None, thorough=None, force_unknown=False,
         step(span(0.05), "Generating C code")
         gen = work / "gen"
         nfuncs, nlines = emit(rom, t, gen, sha, log=log)
+        with open(gen / "gen.h", "a") as f:
+            f.write(f'#define GEN_VERSION "{VERSION}"\n')
 
         # ------------------------------------------------------------ 5. compile
         obj = work / "obj"
@@ -299,9 +304,9 @@ def build(rom_path, out_dir=None, thorough=None, force_unknown=False,
         log("  the game was running: the new version is installed and starts next time")
     (out / "README.txt").write_text(README_TXT, encoding="utf-8")
     summary = {
-        "rom": info, "routines": nfuncs, "lines_of_c": nlines, "coverage_percent": round(cov_pct, 2),
+        "rom": info, "routines": nfuncs, "lines_of_c": nlines, "coverage_percent": round(cov_pct, 2) if n_exec else None,
         "passes": build_pass, "seconds": round(time.time() - t_start), "exe": str(exe),
-        "selftest": [r[1] for r in results], "pipeline_version": PIPELINE_VERSION,
+        "selftest": [r[1] for r in results], "pipeline_version": PIPELINE_VERSION, "version": VERSION,
     }
     (out / "build_info.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False), encoding="utf-8")
     if FROZEN:
@@ -344,8 +349,11 @@ F12        screenshot               Tab / right trigger (hold)   fast-forward
 In the menu: up/down select, left/right change, Enter opens a page or runs an action,
 Esc goes back. The mouse works too (left click changes or activates, right click goes back
 one value).
-Your place is saved when you quit and resumed next time ("Continue on launch").
+Turn on "Continue on launch" in the menu to save your place when you quit and resume it next time.
 Settings: settings.ini   Save states: the states folder   Screenshots: the screenshots folder
+
+When a new version is released, the game offers to update itself when it starts
+(menu > Check for updates turns this off).
 """
 
 
