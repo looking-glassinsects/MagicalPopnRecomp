@@ -250,7 +250,6 @@ These are tracked on the [Issues](https://github.com/looking-glassinsects/Magica
 | 3 | [Side columns change while going through the tubes](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/6) | 16:9 |
 | 4 | [Mace ghosts and clones its sprite](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/7) | Motion smoothing |
 | 5 | [Sprite flickers on the spring in the first area](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/8) | Graphics |
-| 6 | [Frame drops in some rooms and when lots is on screen](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/10) | Performance |
 
 > [!WARNING]
 > After loading a save state inside a narrow castle room, its 16:9 sides use the older method until you leave the room.
