@@ -212,8 +212,9 @@ static void readHeader(const uint8_t* data, int length, int location, CartHeader
   header->type = data[location + 0x15] & 0xf;
   header->coprocessor = data[location + 0x16] >> 4;
   header->chips = data[location + 0x16] & 0xf;
-  header->romSize = 0x400 << data[location + 0x17];
-  header->ramSize = 0x400 << data[location + 0x18];
+  // [recomp] a wrong candidate location can hold any byte here: shifting by 32 or more is undefined
+  header->romSize = data[location + 0x17] < 21 ? 0x400 << data[location + 0x17] : 0;
+  header->ramSize = data[location + 0x18] < 21 ? 0x400 << data[location + 0x18] : 0;
   header->region = data[location + 0x19];
   header->maker = data[location + 0x1a];
   header->version = data[location + 0x1b];
@@ -243,8 +244,8 @@ static void readHeader(const uint8_t* data, int length, int location, CartHeader
       }
     }
     header->gameCode[4] = 0;
-    header->flashSize = 0x400 << data[location - 4];
-    header->exRamSize = 0x400 << data[location - 3];
+    header->flashSize = data[location - 4] < 21 ? 0x400 << data[location - 4] : 0;
+    header->exRamSize = data[location - 3] < 21 ? 0x400 << data[location - 3] : 0;
     header->specialVersion = data[location - 2];
     header->exCoprocessor = data[location - 1];
   } else if(data[location + 0x14] == 0) {

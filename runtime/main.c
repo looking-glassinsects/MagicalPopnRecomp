@@ -489,22 +489,36 @@ static void on_vblank_headless(void) {
             if (getenv("POPN_SNAP_TEST")) {
                 const double F = 1000.0 / 60.0988, t0 = g_frames_run * F;
                 hw_snapshot_publish(t0);
-                for (int k = 1; k <= 3; k++) {
+                for (int k = 1; k <= 4; k++) {          /* k = 4: the real frame's moment */
                     int ww = hw_snapshot_render(t0 + k * F / 4, g_mid);
                     if (!ww) continue;
                     for (int i = 0; i < ww * 224; i++) { rgb[i * 3] = g_mid[i * 4 + 2]; rgb[i * 3 + 1] = g_mid[i * 4 + 1]; rgb[i * 3 + 2] = g_mid[i * 4]; }
                     snprintf(path, sizeof path, "%s/f%05u_q%d.png", g_shot_dir, g_frames_run, k);
                     png_write_rgb(path, rgb, ww, 224);
                     /* ...and the half-pixel picture the display thread now shows (twice as wide) */
-                    static uint8_t fine[HW_FINE_MAX_W * 224 * 4], frgb[HW_FINE_MAX_W * 224 * 3];
+                    static uint8_t fine[HW_FINE_MAX_W * HW_FINE_MAX_H * 4], frgb[HW_FINE_MAX_W * HW_FINE_MAX_H * 3];
                     LARGE_INTEGER q0, q1, q2, qf; QueryPerformanceCounter(&q0);
                     (void)hw_snapshot_render(t0 + k * F / 4, g_mid); QueryPerformanceCounter(&q1);
-                    int fw = hw_snapshot_render_fine(t0 + k * F / 4, fine) * 2; QueryPerformanceCounter(&q2);
+                    int fr = hw_snapshot_render_fine(t0 + k * F / 4, fine); QueryPerformanceCounter(&q2);
+                    int fw = (fr & 0xFFFF) * 2, tall = (fr & HW_FINE_TALL) != 0;
                     if (getenv("POPN_SNAP_TIME")) { QueryPerformanceFrequency(&qf);   /* debug: drawing time, ms */
-                        fprintf(stderr, "snaptime %.3f %.3f\n", (q1.QuadPart - q0.QuadPart) * 1000.0 / qf.QuadPart, (q2.QuadPart - q1.QuadPart) * 1000.0 / qf.QuadPart); }
-                    for (int i = 0; i < fw * 224; i++) { frgb[i * 3] = fine[i * 4 + 2]; frgb[i * 3 + 1] = fine[i * 4 + 1]; frgb[i * 3 + 2] = fine[i * 4]; }
+                        fprintf(stderr, "snaptime %.3f %.3f %d\n", (q1.QuadPart - q0.QuadPart) * 1000.0 / qf.QuadPart, (q2.QuadPart - q1.QuadPart) * 1000.0 / qf.QuadPart, tall); }
+                    /* _fine: 224 rows (the first row of each pair when it has 448);
+                     * _fine2: always 448 rows (each row twice when it has 224) */
+                    for (int y = 0; y < 224; y++)
+                        for (int x = 0; x < fw; x++) {
+                            const uint8_t *s0 = fine + ((size_t)(tall ? y * 2 : y) * fw + x) * 4;
+                            uint8_t *d = frgb + ((size_t)y * fw + x) * 3; d[0] = s0[2]; d[1] = s0[1]; d[2] = s0[0];
+                        }
                     snprintf(path, sizeof path, "%s/f%05u_q%d_fine.png", g_shot_dir, g_frames_run, k);
                     if (fw) png_write_rgb(path, frgb, fw, 224);
+                    for (int y = 0; y < 448; y++)
+                        for (int x = 0; x < fw; x++) {
+                            const uint8_t *s0 = fine + ((size_t)(tall ? y : y / 2) * fw + x) * 4;
+                            uint8_t *d = frgb + ((size_t)y * fw + x) * 3; d[0] = s0[2]; d[1] = s0[1]; d[2] = s0[0];
+                        }
+                    snprintf(path, sizeof path, "%s/f%05u_q%d_fine2.png", g_shot_dir, g_frames_run, k);
+                    if (fw) png_write_rgb(path, frgb, fw, 448);
                 }
             }
         }
@@ -565,7 +579,12 @@ static void on_vblank_headless(void) {
                 }
                 if (g_frames_run % 600 == 0) fflush(rep);
             }
-            memcpy(prevf, curf, (size_t)w * 224 * 4); prevw = w;
+            /* POPN_IP_CONT: compare t = 0 with the previous t = 1 picture instead (with steady
+             * motion the real frame's moment is drawn too, so that's what was on the screen) */
+            static int cont = -1; if (cont < 0) cont = getenv("POPN_IP_CONT") != NULL;
+            if (cont && hw_interp_ready()) { static uint8_t t1n[HW_WIDE_MAX_W * 224 * 4]; int wn = hw_render_interp(1.0f, t1n); memcpy(prevf, wn == w ? t1n : curf, (size_t)w * 224 * 4); }
+            else memcpy(prevf, curf, (size_t)w * 224 * 4);
+            prevw = w;
             if (g_frames_run + 1 >= g_max_frames) { fprintf(rep, "# checked %u, t=1 mismatches %u\n", checked, bad1); fflush(rep); }
         }
     }

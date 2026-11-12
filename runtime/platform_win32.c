@@ -9,6 +9,7 @@
 #include <limits.h>
 #include "platform.h"
 extern volatile int hw_fine_on;     /* hw.c: half-pixel pictures on (off when they take too long here) */
+extern volatile double hw_fine_budget_ms;   /* hw.c: the time there is to draw one */
 #include "settings.h"
 #include "menu.h"
 #include "pad.h"
@@ -30,6 +31,7 @@ static DWORD g_last_mouse;
 /* frame */
 static uint32_t g_frame[1088 * 224];       /* up to twice the widest picture: half-pixel pictures */
 static int g_frame_tw = 256;             /* its width in texels: g_frame_w, or twice that */
+static int g_frame_th = 224;             /* its height in texels: 224, or 448 (half pixels down too) */
 static int g_frame_w = 256;
 
 /* GL textures */
@@ -180,7 +182,7 @@ int plat_init(const char *title) {
     if (!g_gl || !wglMakeCurrent(g_dc, g_gl)) return 0;
     p_wglSwapIntervalEXT = (PFNWGLSWAPINTERVALEXTPROC)wglGetProcAddress("wglSwapIntervalEXT");
 
-    t_game = make_tex(2048, 256, 0);
+    t_game = make_tex(2048, 512, 0);
     t_text_fps[0] = make_tex(512, 64, 1); t_text_fps[1] = make_tex(512, 64, 1);
     t_text_toast[0] = make_tex(1024, 64, 1); t_text_toast[1] = make_tex(1024, 64, 1);
     /* scanline mask: 1x2, second row darkened (premultiplied alpha) */
@@ -486,7 +488,7 @@ static void draw_all(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filt);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt);
     glColor4f(1, 1, 1, 1);
-    quad((float)gr.left, (float)gr.top, (float)gr.right, (float)gr.bottom, 0, 0, g_frame_tw / 2048.0f, 224 / 256.0f);
+    quad((float)gr.left, (float)gr.top, (float)gr.right, (float)gr.bottom, 0, 0, g_frame_tw / 2048.0f, g_frame_th / 512.0f);
     glEnable(GL_BLEND);
     if (g_set.scanlines && gr.bottom - gr.top >= 448) {
         glBindTexture(GL_TEXTURE_2D, t_scan);
@@ -542,7 +544,7 @@ void plat_present(const uint8_t *px, int width) {
     if (g_dt || width < 1 || width > 544) return;
     shown_log(px, width);
     memcpy(g_frame, px, (size_t)width * 224 * 4);
-    g_frame_w = width; g_frame_tw = width;
+    g_frame_w = width; g_frame_tw = width; g_frame_th = 224;
     glBindTexture(GL_TEXTURE_2D, t_game);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, 224, GL_BGRA_EXT, GL_UNSIGNED_BYTE, g_frame);
     g_fps_frames++;
@@ -564,8 +566,20 @@ void plat_redraw(void) {
  * and emulation, and must not use GL while the thread runs. */
 static volatile LONG g_dt_run;
 static int (*g_dt_render)(double, uint8_t *);
-static uint8_t g_dt_buf[1088 * 224 * 4];
+static uint8_t g_dt_buf[1088 * 448 * 4];
 static volatile LONG g_dt_fps = 120;
+/* put the display thread's new picture (render's result r: width, plus HW_FINE_TALL when it has
+ * 448 rows) on the game texture; 0 if there was none */
+#define DT_TALL 0x10000                     /* = HW_FINE_TALL */
+static int dt_upload(int r) {
+    int w = r & 0xFFFF, h = (r & DT_TALL) ? 448 : 224;
+    if (w <= 0 || w > 544) return 0;
+    g_frame_w = w; g_frame_tw = 2 * w; g_frame_th = h;
+    glBindTexture(GL_TEXTURE_2D, t_game);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2 * w, h, GL_BGRA_EXT, GL_UNSIGNED_BYTE, g_dt_buf);
+    if (h == 224) shown_log(g_dt_buf, 2 * w);
+    return 1;
+}
 
 void plat_display_rate(int fps) { g_dt_fps = fps < 61 ? 61 : fps; }
 
@@ -741,8 +755,9 @@ static void display_loop_vblank(FILE *pace) {
         enum { DT_AHEAD_US = 3000 };
         /* Half-pixel pictures take about twice as long to draw, so drawing starts earlier (up to
          * 6.5 ms, never before the previous picture is presented). If they still don't fit in
-         * that time on this machine, whole-pixel pictures are drawn instead for a while. */
-        if (!hw_fine_on && GetTickCount() - fine_off_tick > 10000) { hw_fine_on = 1; draw_ema = 0; }
+         * that time on this machine, a step less is drawn for a while: half pixels across only,
+         * then whole pixels. */
+        if (hw_fine_on < 2 && GetTickCount() - fine_off_tick > 10000) { hw_fine_on++; draw_ema = 0; fine_off_tick = GetTickCount(); }
         double ahead_max = k * P - 1.5;
         const double ahead = hw_fine_on ? (ahead_max < 6.5 ? (ahead_max > DT_AHEAD_US / 1000.0 ? ahead_max : DT_AHEAD_US / 1000.0) : 6.5)
                                          : DT_AHEAD_US / 1000.0;
@@ -760,19 +775,15 @@ static void display_loop_vblank(FILE *pace) {
          * without the picture having to wait for it. */
         double target = v - ahead - 3.25;
         double t_draw = plat_now_ms();
-        int w = g_dt_render(target, g_dt_buf);         /* half-pixel picture: 2 x w columns */
+        hw_fine_budget_ms = ahead + 0.3;               /* it must be ready 1 ms after v, less a margin */
+        int r = g_dt_render(target, g_dt_buf);         /* half-pixel picture: 2 x w columns */
         if (hw_fine_on) {
             double took = plat_now_ms() - t_draw;
             draw_ema = draw_ema ? draw_ema * 0.95 + took * 0.05 : took;
-            if (draw_ema > ahead + 0.5) { hw_fine_on = 0; fine_off_tick = GetTickCount(); }
+            /* too slow: half pixels down go first, then across */
+            if (draw_ema > ahead + 0.5) { hw_fine_on--; fine_off_tick = GetTickCount(); draw_ema = 0; }
         }
-        if (w > 0 && w <= 544) {
-            memcpy(g_frame, g_dt_buf, (size_t)w * 2 * 224 * 4);
-            g_frame_w = w; g_frame_tw = 2 * w;
-            glBindTexture(GL_TEXTURE_2D, t_game);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2 * w, 224, GL_BGRA_EXT, GL_UNSIGNED_BYTE, g_frame);
-            shown_log(g_dt_buf, 2 * w);
-        }
+        dt_upload(r);
         g_fps_frames++;
         /* present 1 ms after the refresh: clearly after it (so it can only be shown at the
          * next one, whatever small error the clock has), with ~3 ms to spare before that */
@@ -821,13 +832,8 @@ static DWORD WINAPI display_thread(LPVOID arg) {
         if (target < now + 0.5) target = now + P * 0.5;
         if (phase == 0) {                                   /* a new picture; otherwise show it again */
             k = dt_refreshes_per_picture(hz);
-            int w = g_dt_render(target, g_dt_buf);     /* half-pixel picture: 2 x w columns */
-            if (w > 0 && w <= 544) {
-                memcpy(g_frame, g_dt_buf, (size_t)w * 2 * 224 * 4);
-                g_frame_w = w; g_frame_tw = 2 * w;
-                glBindTexture(GL_TEXTURE_2D, t_game);
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2 * w, 224, GL_BGRA_EXT, GL_UNSIGNED_BYTE, g_frame);
-            }
+            hw_fine_budget_ms = k * P * 0.6;
+            dt_upload(g_dt_render(target, g_dt_buf));  /* half-pixel picture: 2 x w columns */
             g_fps_frames++;
         }
         int was_new = phase == 0;

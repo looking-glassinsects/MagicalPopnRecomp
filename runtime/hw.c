@@ -43,6 +43,7 @@ int hw_init(const uint8_t *rom, size_t size, void (*vblank_cb)(void)) {
     g = snes_init();
     if (!snes_loadRom(g, rom, (int)size)) return 0;
     snes_setPixelFormat(g, pixelFormatXRGB);  /* byte order B,G,R,X = Windows DIB */
+    g->ppu->noPixelBuffer = true;             /* only the wide output (wsBuffer) is used */
     hw_nmi_ptr = (const volatile uint8_t *)&g->cpu->nmiWanted;
     hw_irq_ptr = (const volatile uint8_t *)&g->cpu->irqWanted;
     g_vblank_cb = vblank_cb;
@@ -162,13 +163,14 @@ int hw_load_state(uint8_t *buf, int size) {
     return 1;
 }
 
+static void ws_audit_frame(void);
 void hw_end_frame(void) {
     /* LakeSnes only catches the APU up on port access or in snes_runFrame (which we
      * don't use); a side-effect-free port read forces the catch-up each frame. */
     (void)snes_readBBus(g, 0x40);
+    ws_audit_frame();
 }
 
-void hw_get_pixels(uint8_t *px) { snes_setPixels(g, px); }
 /* ---------------------------------------------------------------- widescreen
  * Magical Pop'n keeps each gameplay layer's level map decoded in WRAM as a ring buffer
  * (BG1: $7E:C100, BG2: $7F:C100; row stride in $84 / $9A, ring width = stride / 2) and only
@@ -184,6 +186,8 @@ static WsAnchor g_anchor[2] = {{-1, 0, -1, 0, 0, 0, 0, -1}, {-1, 0, -1, 0, 0, 0,
 static void ws_reset_anchors(void) { for (int i = 0; i < 2; i++) { g_anchor[i].delta = -1; g_anchor[i].locked = 0; g_anchor[i].first_h = -1; g_anchor[i].stride = 0; g_anchor[i].scrolled = 0; g_anchor[i].miss = 0; g_anchor[i].map = -1; } }
 
 static int g_dbg_best, g_dbg_best_d, g_dbg_best_rd, g_dbg_total, g_dbg_nseen, g_dbg_odd;
+static int g_match_ties;   /* last full ws_match search: anchors sharing the best score (1 = unique) */
+static int g_ties_agree;   /* ...and whether all of them give the same tiles beside the visible window */
 static int g_ws_failed; static char g_ws_fail_info[200];
 int hw_ws_failed(const char **info) { if (info) *info = g_ws_fail_info; return g_ws_failed; }
 /* Find where the visible part of the hardware tilemap sits in the level map. Columns: ring
@@ -225,7 +229,9 @@ static int ws_match(Ppu *ppu, int layer, const uint8_t *base, int stride, int ro
     int v = ppu->bgLayer[layer].vScroll & 0x3ff;
     uint16_t map = ppu->bgLayer[layer].tilemapAdr;
     enum { NR = 14 };
-    int total = 17 * NR, best = -1, best_d = -1, best_rd = 0;
+    int total = 17 * NR, best = -1, best_d = -1, best_rd = 0, raw_best = -1, ties = 0;
+    int tie_d[16], tie_rd[16];
+    g_match_ties = 0; g_ties_agree = 0;
     static uint16_t vcol[17][NR], vrow[NR][17];
     int lrow[NR];                                    /* unwrapped screen-row index of each sample */
     int mcj[NR], pg[NR];
@@ -275,11 +281,26 @@ static int ws_match(Ppu *ppu, int layer, const uint8_t *base, int stride, int ro
             int score = 0;
             for (int j = 0; j < NR; j++)
                 score += ws_row_score(base, stride, w, lrow[j] + rd, mcj[j] + d, pg[j], mcj[j] != mc0, vrow[j]);
+            if (score > raw_best) { raw_best = score; ties = 0; }
+            if (score == raw_best) { if (ties < 16) { tie_d[ties] = d; tie_rd[ties] = rd; } ties++; }
             if (d == a->delta && rd == a->rdelta) score += 1;   /* prefer last frame's anchor on ties */
             if (score > best) { best = score; best_d = d; best_rd = rd; }
         }
     }
-    g_dbg_best = best; g_dbg_best_d = best_d; g_dbg_best_rd = best_rd;
+    g_dbg_best = best; g_dbg_best_d = best_d; g_dbg_best_rd = best_rd; g_match_ties = ties;
+    /* do the equally good places agree on the 6 tile columns either side of the window? */
+    if (ties >= 1 && ties <= 16) {
+        g_ties_agree = 1;
+        for (int t = 1; t < ties && g_ties_agree; t++)
+            for (int j = 0; j < NR && g_ties_agree; j++)
+                for (int k = -6; k < 23; k++) {
+                    if (k == 0) k = 17;
+                    int r0 = lrow[j] + tie_rd[0], r1 = lrow[j] + tie_rd[t];
+                    const uint8_t *p0 = base + r0 * stride + ((((mcj[j] + k + tie_d[0]) % w) + w) % w) * 2;
+                    const uint8_t *p1 = base + r1 * stride + ((((mcj[j] + k + tie_d[t]) % w) + w) % w) * 2;
+                    if (p0[0] != p1[0] || p0[1] != p1[1]) { g_ties_agree = 0; break; }
+                }
+    }
     if (best * 100 < total * 92) { a->locked = 0; return -1; }
     a->delta = best_d; a->rdelta = best_rd; a->locked = 1;
     return best_d;
@@ -396,9 +417,20 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
         if (l == 1 && (ppu->bgLayer[1].hScroll & 0x3ff) != (ppu->bgLayer[0].hScroll & 0x3ff) &&
             ppu->mode == 1 && ppu->bgLayer[1].bigTiles && !ppu->bgLayer[1].tilemapWider) {
             int st = s->ram[0x9A] | (s->ram[0x9B] << 8);
-            if (st > 64 && st <= 1024 && !(st & 1)) {
+            /* A map exactly as wide as the hardware tilemap counts too (the dark forest streams its
+             * 512 px back layer column by column, leaving filler in the tilemap elsewhere), but only
+             * on a perfect match whose equally good places (a repeating pattern fits in several) all
+             * give the same tiles beside the window: in halls hung with curtains they don't, and the
+             * wrong one patches the sides with pieces of curtain. */
+            if (st >= 64 && st <= 1024 && !(st & 1)) {
                 WsAnchor tmp = g_anchor[1];
-                parallax_ring = ws_match(ppu, 1, s->ram + 0x10000 + 0xC100, st, 0x3F00 / st, &tmp) >= 0;
+                if (st == 64) tmp.delta = -1;          /* a full search, so ties are counted */
+                parallax_ring = ws_match(ppu, 1, s->ram + 0x10000 + 0xC100, st, 0x3F00 / st, &tmp) >= 0 &&
+                                (st > 64 || (g_dbg_best == g_dbg_total && g_ties_agree));
+                /* ...and, for those, only once it has fitted 3 frames running: for a single frame
+                 * the game's copy can hold another area that happens to fit */
+                static int narrow_run;
+                if (st == 64) { narrow_run = parallax_ring ? narrow_run + 1 : 0; if (narrow_run < 3) parallax_ring = 0; }
             }
         }
         if (l == 1 && !parallax_ring && (ppu->bgLayer[1].hScroll & 0x3ff) != (ppu->bgLayer[0].hScroll & 0x3ff)) {
@@ -694,6 +726,30 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
             if (narrow && ws_tilemap_complete(ppu, 0)) ws_src_vram(ppu, 0);
         }
     }
+    /* A gameplay room no wider than the 512 px hardware tilemap whose picture can't be found in
+     * the level map (the playfield layer is empty there, or the game drew the room into the
+     * tilemap only): the tilemap holds the whole room, so the sides come straight from it, up to
+     * the room's own ends (from the camera $62 and the room width $86). */
+    if (!ppu->wsSrc[0].valid && ppu->mode == 1 && !ppu->forcedBlank && (ppu->bgLayer[2].hScroll & 0x3ff) == 0x3FC &&
+        ppu->layer[2].mainScreenEnabled && ppu->bgLayer[0].bigTiles && !ppu->bgLayer[0].tilemapWider) {
+        int w_px = (s->ram[0x86] | (s->ram[0x87] << 8)) * 16 + 256;
+        int cam = (s->ram[0x62] | (s->ram[0x63] << 8)) - 0x180;
+        int h = ppu->bgLayer[0].hScroll & 0x3ff;
+        int k = (cam - h + 512) >> 10;
+        if (cam - h + 512 < 0) k = -((h - cam + 511) >> 10);
+        int cam_r = h + 1024 * k;
+        if (w_px > 256 && w_px <= 512 && cam_r - cam < 64 && cam - cam_r < 64 && cam > -64 && cam < w_px) {
+            ws_src_vram(ppu, 0);
+            ppu->wsSrc[0].clamp = true; ppu->wsSrc[0].lxMin = h - cam_r; ppu->wsSrc[0].lxMax = h - cam_r + w_px;
+            ppu->wsRefH = h; ppu->wsCamLine = 1;
+            if (!ppu->wsSrc[1].valid && ppu->bgLayer[1].bigTiles && !ppu->bgLayer[1].tilemapWider) {
+                ws_back_from_vram(ppu);
+                if ((ppu->bgLayer[1].hScroll & 0x3ff) == h) {
+                    ppu->wsSrc[1].clamp = true; ppu->wsSrc[1].lxMin = ppu->wsSrc[0].lxMin; ppu->wsSrc[1].lxMax = ppu->wsSrc[0].lxMax;
+                }
+            }
+        }
+    }
     /* The final boss's arena (stage 195) is a backdrop that repeats by design and has no level
      * map, so its side columns come straight from the hardware tilemaps. */
     if (!ppu->wsSrc[0].valid && (s->ram[0x480] | (s->ram[0x481] << 8)) == 195 && ppu->mode == 1 && !ppu->forcedBlank) {
@@ -790,6 +846,11 @@ uint16_t hw_bg_hscroll(int layer) { return g->ppu->bgLayer[layer & 3].hScroll; }
  * from the previous frame's position to the current one. Pixel art stays crisp (no blending).
  * Jumps (camera cuts, sprites reusing a slot elsewhere) aren't interpolated. */
 #define RG_START offsetof(Ppu, objPriority)
+/* Magical Pop'n's objects: 48-byte records from $1000; +0 handler, +4 X (+7 its fraction), +8 Y
+ * (+11 its fraction). The camera is at $62/$64. */
+#define IP_OBJ_BASE 0x1000
+#define IP_OBJ_BYTES 0x0C00
+#define IP_OBJ_SIZE 0x30
 #define RG_SIZE  (offsetof(Ppu, pixelBuffer) - offsetof(Ppu, objPriority))
 typedef struct {
     int valid, lines;
@@ -798,6 +859,18 @@ typedef struct {
     uint16_t oam[0x100];
     uint8_t high[0x20];
     uint32_t gfx[128];            /* fingerprint of each sprite's pixel data in VRAM */
+    /* the object each sprite was drawn for, and the game's object table and camera as they were
+     * when this frame's sprite list was built: exact (sub-pixel) object motion between frames */
+    uint16_t tag[128];
+    uint8_t objs[IP_OBJ_BYTES];
+    int camx, camy, has_objs;
+    /* steady motion (ip_steady): where each picture is really drawn, relative to what the game
+     * drew, in pixels across: each layer's scroll on each line, and each sprite */
+    float ex[4][240];
+    float sox[128];
+    uint8_t hud[128];             /* the sprite stays put on the screen (status bar) */
+    int steady;                   /* some offset isn't 0: the real frame is drawn, not shown as is */
+    int st_ok;                    /* the offsets were worked out (else all are 0) */
     /* the palette each line was drawn with: games change it during the frame (fades, colour
      * gradients), and the end-of-frame palette alone would recolour the earlier lines */
     int mixed_blank;              /* the screen was switched off for part of the frame */
@@ -807,6 +880,87 @@ typedef struct {
 } IpFrame;
 static IpFrame *g_ip[2];          /* [0] previous frame, [1] current frame */
 static int g_ip_on;               /* recording enabled */
+/* sprite -> object, as the game writes its sprite list; the list built during one frame is shown
+ * in the next, so its tags and the objects' positions wait one frame (pending) */
+static uint16_t g_tag_build[128], g_tag_pending[128];
+static uint8_t g_objs_pending[IP_OBJ_BYTES], g_list_pending[0x200];
+static int g_cam_pending[2], g_pending_ok;
+void hw_oam_tag(int sprite, uint16_t object) { if (sprite >= 0 && sprite < 128) g_tag_build[sprite] = object; }
+
+/* test switch POPN_WS_AUDIT: what the 16:9 side columns leave out, counted per frame and printed
+ * as one WSAUDIT line at exit. Frames with a picture; of those, sides blacked out (on a gameplay
+ * screen / on another screen); BG3 or BG4 showing at the 4:3 edge below the status bar (cut off
+ * at the sides: main screen / sub screen); frames with holes filled from the previous frame;
+ * mode 7 or hi-res frames; objects appearing or vanishing while wholly inside a side column. */
+extern int ppuAuditOn; extern unsigned ppuAuditEdge, ppuAuditHoles;
+static struct { unsigned pic, blank_game, blank_other, bg3m, bg3s, bg4m, bg4s, holes, m7, hires, appear, vanish, appear_edge, vanish_edge, appear_any, vanish_any; } g_aud;
+static struct { uint16_t tag, handler; int inside, edge; } g_aud_prev[128];
+static int g_aud_prev_n, g_aud_prev_ok;   /* last frame's objects, and whether it was looked at */
+static void ws_audit_print(void) {
+    fprintf(stderr, "WSAUDIT pic %u blank_game %u blank_other %u bg3_main %u bg3_sub %u bg4_main %u bg4_sub %u holes %u mode7 %u hires %u appear %u vanish %u appear_edge %u vanish_edge %u appear_any %u vanish_any %u\n",
+            g_aud.pic, g_aud.blank_game, g_aud.blank_other, g_aud.bg3m, g_aud.bg3s, g_aud.bg4m, g_aud.bg4s, g_aud.holes, g_aud.m7, g_aud.hires, g_aud.appear, g_aud.vanish, g_aud.appear_edge, g_aud.vanish_edge, g_aud.appear_any, g_aud.vanish_any);
+}
+static void ws_audit_frame(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("POPN_WS_AUDIT"); on = e ? (atoi(e) > 1 ? 2 : 1) : 0; ppuAuditOn = on > 0; if (on) atexit(ws_audit_print); }
+    if (!on) return;
+    Ppu *p = g->ppu;
+    unsigned edge = ppuAuditEdge, holes = ppuAuditHoles; ppuAuditEdge = 0; ppuAuditHoles = 0;
+    if (p->forcedBlank || p->brightness == 0 || p->wsExtra <= 0) { g_aud_prev_ok = 0; return; }
+    g_aud.pic++;
+    int game = p->mode == 1 && (p->bgLayer[2].hScroll & 0x3ff) == 0x3FC && p->layer[2].mainScreenEnabled;
+    if (p->mode == 7) g_aud.m7++;
+    if (p->mode == 5 || p->mode == 6) g_aud.hires++;
+    if (p->wsBlank) { if (game) g_aud.blank_game++; else g_aud.blank_other++; g_aud_prev_ok = 0; return; }
+    if (edge & 0x004) g_aud.bg3m++;
+    if (edge & 0x400) g_aud.bg3s++;
+    if (edge & 0x008) g_aud.bg4m++;
+    if (edge & 0x800) g_aud.bg4s++;
+    if (holes) g_aud.holes++;
+    /* objects (by the sprites drawn for them) appearing or vanishing inside a side column */
+    static const int sizes[8][2] = {{8, 16}, {8, 32}, {8, 64}, {16, 32}, {16, 64}, {32, 64}, {16, 32}, {16, 32}};
+    int ws = p->wsExtra;
+    struct { uint16_t tag, handler; int any, inside, minx, maxx; } cur[128]; int n = 0;
+    for (int i = 0; i < 128; i++) {
+        uint16_t t = g_tag_build[i];
+        if (t < IP_OBJ_BASE || t >= IP_OBJ_BASE + IP_OBJ_BYTES || (t - IP_OBJ_BASE) % IP_OBJ_SIZE) continue;
+        const uint8_t *e = g->ram + 0x800 + i * 4;
+        int hb = g->ram[0xA00 + (i >> 2)] >> ((i & 3) * 2);
+        int x = e[0] | ((hb & 1) << 8), y = e[1], sz = sizes[p->objSize & 7][(hb >> 1) & 1];
+        if (x >= 384) x -= 512;
+        if (y >= 224 && y < 240) continue;
+        int in = (x >= -ws + 16 && x + sz <= 0) || (x >= 256 && x + sz <= 256 + ws - 16);
+        int k = 0; while (k < n && cur[k].tag != t) k++;
+        if (k == n) { cur[n].tag = t; cur[n].handler = (uint16_t)(g->ram[t] | (g->ram[t + 1] << 8)); cur[n].any = 0; cur[n].inside = 1; cur[n].minx = 9999; cur[n].maxx = -9999; n++; }
+        cur[k].any = 1; if (!in) cur[k].inside = 0;
+        if (x < cur[k].minx) cur[k].minx = x; if (x + sz > cur[k].maxx) cur[k].maxx = x + sz;
+    }
+    int edgef[128];
+    for (int k = 0; k < n; k++) edgef[k] = (cur[k].minx >= -2 && cur[k].minx <= 8) || (cur[k].maxx >= 248 && cur[k].maxx <= 258);
+    for (int k = 0; k < n; k++) {
+        int was0 = 0; for (int j = 0; j < g_aud_prev_n; j++) if (g_aud_prev[j].tag == cur[k].tag && g_aud_prev[j].handler == cur[k].handler) was0 = 1;
+        if (!was0 && g_aud_prev_ok) { g_aud.appear_any++; if (edgef[k]) { g_aud.appear_edge++; if (on > 1) fprintf(stderr, "wsaudit appear_edge f%u obj %04X handler %04X x %d..%d\n", g->frames, cur[k].tag, cur[k].handler, cur[k].minx, cur[k].maxx); } }
+        if (!cur[k].inside) continue;
+        int was = 0; for (int j = 0; j < g_aud_prev_n; j++) if (g_aud_prev[j].tag == cur[k].tag && g_aud_prev[j].handler == cur[k].handler) was = 1;
+        if (!was && g_aud_prev_ok) {
+            g_aud.appear++;
+            if (on > 1) fprintf(stderr, "wsaudit appear f%u obj %04X handler %04X\n", g->frames, cur[k].tag, cur[k].handler);
+        }
+    }
+    for (int j = 0; j < (g_aud_prev_ok ? g_aud_prev_n : 0); j++) {
+        int is0 = 0; for (int k = 0; k < n; k++) if (cur[k].tag == g_aud_prev[j].tag && cur[k].handler == g_aud_prev[j].handler) is0 = 1;
+        if (!is0) { g_aud.vanish_any++; if (g_aud_prev[j].edge) { g_aud.vanish_edge++; if (on > 1) fprintf(stderr, "wsaudit vanish_edge f%u obj %04X handler %04X\n", g->frames, g_aud_prev[j].tag, g_aud_prev[j].handler); } }
+        if (!g_aud_prev[j].inside) continue;
+        int is = 0; for (int k = 0; k < n; k++) if (cur[k].tag == g_aud_prev[j].tag && cur[k].handler == g_aud_prev[j].handler) is = 1;
+        if (!is) {
+            g_aud.vanish++;
+            if (on > 1) fprintf(stderr, "wsaudit vanish f%u obj %04X handler %04X\n", g->frames, g_aud_prev[j].tag, g_aud_prev[j].handler);
+        }
+    }
+    for (int k = 0; k < n; k++) { g_aud_prev[k].tag = cur[k].tag; g_aud_prev[k].handler = cur[k].handler; g_aud_prev[k].inside = cur[k].inside; g_aud_prev[k].edge = edgef[k]; }
+    g_aud_prev_n = n; g_aud_prev_ok = 1;
+}
+
 
 static void ip_line_hook(Ppu *ppu, int line, void *user) {
     (void)user;
@@ -836,7 +990,26 @@ void hw_interp_enable(int on) {
     /* recording goes into g_ip[1]; the hook swaps them at each vblank */
 }
 
-static void ip_invalidate(void) { if (g_ip[0]) g_ip[0]->valid = g_ip[1]->valid = 0; }
+static void ip_invalidate(void) { if (g_ip[0]) g_ip[0]->valid = g_ip[1]->valid = 0; g_pending_ok = 0; }
+
+/* A sprite's exact on-screen motion from the previous frame to the current one, from its object
+ * (in pixels, fractional): 1 if known. Unknown when the sprite wasn't drawn for an object, the
+ * object slot now holds a different object, or the move is too big to be one frame's motion. */
+static int ip_object_motion(const IpFrame *prev, const IpFrame *cur, int i, float *dx, float *dy) {
+    if (!prev->has_objs || !cur->has_objs) return 0;
+    unsigned t = cur->tag[i];
+    if (t < IP_OBJ_BASE || t >= IP_OBJ_BASE + IP_OBJ_BYTES - IP_OBJ_SIZE || (t - IP_OBJ_BASE) % IP_OBJ_SIZE) return 0;
+    const uint8_t *a = prev->objs + (t - IP_OBJ_BASE), *b = cur->objs + (t - IP_OBJ_BASE);
+    if ((a[0] | (a[1] << 8)) != (b[0] | (b[1] << 8)) || !(b[0] | b[1])) return 0;   /* another object now */
+    int ax = (a[4] | (a[5] << 8)) * 256 + a[7], bx = (b[4] | (b[5] << 8)) * 256 + b[7];
+    int ay = (a[8] | (a[9] << 8)) * 256 + a[11], by = (b[8] | (b[9] << 8)) * 256 + b[11];
+    int ddx = bx - ax, ddy = by - ay;
+    if (ddx > 0x7FFFFF) ddx -= 0x1000000; if (ddx < -0x7FFFFF) ddx += 0x1000000;   /* 16-bit wrap */
+    if (ddy > 0x7FFFFF) ddy -= 0x1000000; if (ddy < -0x7FFFFF) ddy += 0x1000000;
+    int cdx = (int16_t)(cur->camx - prev->camx), cdy = (int16_t)(cur->camy - prev->camy);
+    *dx = ddx / 256.0f - cdx; *dy = ddy / 256.0f - cdy;
+    return *dx >= -24 && *dx <= 24 && *dy >= -24 && *dy <= 24;
+}
 
 /* Fingerprint of the pixel data a sprite shows. Games often animate a character by copying
  * new artwork into the same tiles, so the tile number alone doesn't say whether it changed. */
@@ -854,6 +1027,130 @@ static uint32_t ip_sprite_gfx(const Ppu *p, int i) {
             for (int k = 0; k < 16; k++) { h ^= p->vram[(base + t * 16 + k) & 0x7fff]; h *= 16777619u; }
         }
     return h;
+}
+
+/* The fraction of object t's position in frame f, 0..1 (at = 7: X, 11: Y), or -1: no object */
+static float ip_object_frac(const IpFrame *f, uint16_t t, int at) {
+    if (!f->has_objs || t < IP_OBJ_BASE || t >= IP_OBJ_BASE + IP_OBJ_BYTES - IP_OBJ_SIZE || (t - IP_OBJ_BASE) % IP_OBJ_SIZE) return -1;
+    const uint8_t *b = f->objs + (t - IP_OBJ_BASE);
+    if (!(b[0] | b[1])) return -1;
+    return b[at] / 256.0f;
+}
+
+/* Steady motion. The game keeps its camera in whole pixels, so following the heroine at 2.75 px
+ * a frame it moves 2, 3, 3, 3: smoothing spreads each frame's step evenly, but the steps still
+ * differ from frame to frame. Here each layer's scroll on each line follows a steady path
+ * instead: its average motion over the last 8 frames, kept within 3/4 of a pixel of where the game
+ * put it (a sudden change of speed is caught up within a frame or two). It returns exactly to
+ * the game's position when the layer stops, reverses, or jumps. Sprites in the playfield move
+ * with it, at their objects' exact positions (the fraction the game keeps for each); sprites
+ * that stay put on the screen while the playfield scrolls (the status bar) are left alone.
+ * Every picture, the real frame's moment included, is then drawn at half-pixel precision. */
+typedef struct { int on, cnt; float pos, d[8]; } IpTrack;
+static IpTrack g_track[4][240];
+static struct { uint16_t key; int16_t x, y; } g_hud[64];   /* sprites seen staying put on the screen */
+static int g_hud_n, g_hud_next;
+static uint16_t g_field_age[240];  /* frames since the playfield layer last scrolled on each line (0: never) */
+static int g_ip_steady = -1;
+#define IP_STEADY_MAXD 16
+static int ip_hud_has(uint16_t key, int x, int y) {
+    for (int k = 0; k < g_hud_n; k++) if (g_hud[k].key == key && g_hud[k].x == x && g_hud[k].y == y) return 1;
+    return 0;
+}
+static void ip_steady(IpFrame *f, const IpFrame *pv) {
+    memset(f->ex, 0, sizeof f->ex); memset(f->sox, 0, sizeof f->sox); memset(f->hud, 0, sizeof f->hud);
+    f->steady = 0;
+    if (g_ip_steady < 0) g_ip_steady = getenv("POPN_IP_NOSTEADY") == NULL;
+    int ok = g_ip_steady && f->valid && pv->valid && !f->mixed_blank && !pv->mixed_blank;
+    f->st_ok = ok;
+    if (!ok) { memset(g_track, 0, sizeof g_track); memset(g_field_age, 0, sizeof g_field_age); g_hud_n = g_hud_next = 0; return; }
+    for (int line = 1; line < 240; line++) {
+        if (!f->has[line] || !pv->has[line]) { for (int l = 0; l < 4; l++) g_track[l][line].on = 0; continue; }
+        const Ppu *c1 = (const Ppu *)((const uint8_t *)f->regs[line] - RG_START);
+        const Ppu *c0 = (const Ppu *)((const uint8_t *)pv->regs[line] - RG_START);
+        for (int l = 0; l < 4; l++) {
+            IpTrack *s = &g_track[l][line];
+            if (c1->mode != c0->mode || c1->forcedBlank || c0->forcedBlank || (c1->mode == 7 && l == 0)) { s->on = 0; continue; }
+            int c = c1->bgLayer[l].hScroll & 0x3ff;
+            int d = ((c - (c0->bgLayer[l].hScroll & 0x3ff) + 512) & 0x3ff) - 512;
+            if (l == 0) g_field_age[line] = d ? 1 : g_field_age[line] && g_field_age[line] < 1000 ? g_field_age[line] + 1 : g_field_age[line];
+            if (!s->on || d > IP_STEADY_MAXD || d < -IP_STEADY_MAXD) { s->on = 1; s->cnt = 0; s->pos = (float)c; continue; }
+            s->d[s->cnt & 7] = (float)d; s->cnt++;
+            int n = s->cnt < 8 ? s->cnt : 8, pos = 0, neg = 0; float v = 0;
+            for (int k = 0; k < n; k++) { v += s->d[k]; pos |= s->d[k] > 0; neg |= s->d[k] < 0; }
+            v /= n;
+            /* stopping, or going back and forth (a ripple, a turn): half way back to where the game
+             * put it each frame (no jump on a still screen) */
+            float e;
+            int stopped = d == 0 && s->cnt >= 2 && s->d[(s->cnt - 2) & 7] == 0;   /* two still frames */
+            if (stopped || (pos && neg)) {
+                if (pos && neg) s->cnt = 0;
+                e = s->pos - c; e -= 1024.0f * floorf(e / 1024.0f + 0.5f);
+                e = fabsf(e) < 0.05f ? 0 : 0.5f * e;
+            } else {
+                e = s->pos + v - c;
+                e -= 1024.0f * floorf(e / 1024.0f + 0.5f);
+                e *= 0.9f;        /* drawn back toward the game's position, so it stays centred on it */
+            }
+            if (e > 0.75f) e = 0.75f; if (e < -0.75f) e = -0.75f;
+            e = roundf(e * 64.0f) / 64.0f;               /* exact in the sums that use it */
+            s->pos = c + e;
+            f->ex[l][line] = e;
+            if (e != 0) f->steady = 1;
+        }
+    }
+    {   /* test switch POPN_IP_STEADYLOG: each layer's scroll and steady offset on line 120 */
+        static int lg = -1; if (lg < 0) lg = getenv("POPN_IP_STEADYLOG") != NULL;
+        if (lg) {
+            const Ppu *c1 = (const Ppu *)((const uint8_t *)f->regs[120] - RG_START);
+            fprintf(stderr, "steady f%u", hw_frame_count());
+            for (int l = 0; l < 4; l++) fprintf(stderr, " %d %.4f", c1->bgLayer[l].hScroll & 0x3ff, f->ex[l][120]);
+            fprintf(stderr, "\n");
+        }
+    }
+    /* sprites */
+    for (int i = 0; i < 128; i++) {
+        int hb = (i * 2) & 7, byte = i >> 2;
+        int x = (f->oam[i * 2] & 0xff) | (((f->high[byte] >> hb) & 1) << 8), y = f->oam[i * 2] >> 8;
+        int big = (f->high[byte] >> (hb + 1)) & 1;
+        uint16_t key = f->oam[i * 2 + 1];
+        if (y >= 224 && y < 240) continue;
+        int line = y + 8; if (line < 1) line = 1; if (line > 239) line = 239;
+        if (!ip_hud_has(key, x, y)) {
+            /* The same sprite at the same place although what it should move with moved: its
+             * object's whole-pixel place on the screen, or (no object) the playfield behind it.
+             * It stays put on the screen (the status bar, some of it drawn for the heroine). */
+            int moved;
+            float odx, ody;
+            if (ip_object_motion(pv, f, i, &odx, &ody)) {
+                const uint8_t *a = pv->objs + (f->tag[i] - IP_OBJ_BASE), *b = f->objs + (f->tag[i] - IP_OBJ_BASE);
+                int ix = (int16_t)((b[4] | (b[5] << 8)) - (a[4] | (a[5] << 8))) - (int16_t)(f->camx - pv->camx);
+                int iy = (int16_t)((b[8] | (b[9] << 8)) - (a[8] | (a[9] << 8))) - (int16_t)(f->camy - pv->camy);
+                moved = ix || iy;
+            } else {
+                const Ppu *c1 = (const Ppu *)((const uint8_t *)f->regs[line] - RG_START);
+                const Ppu *c0 = (const Ppu *)((const uint8_t *)pv->regs[line] - RG_START);
+                moved = f->has[line] && pv->has[line] && ((c1->bgLayer[0].hScroll - c0->bgLayer[0].hScroll) & 0x3ff);
+            }
+            if (moved) {
+                    for (int j = 0; j < 128; j++) {
+                        int pb = (pv->high[j >> 2] >> ((j * 2) & 7)) & 3;
+                        if (pv->oam[j * 2 + 1] == key && pv->oam[j * 2] == f->oam[i * 2] &&
+                            (pb & 1) == ((x >> 8) & 1) && ((pb >> 1) & 1) == big) {
+                            g_hud[g_hud_next].key = key; g_hud[g_hud_next].x = (int16_t)x; g_hud[g_hud_next].y = (int16_t)y;
+                            g_hud_next = (g_hud_next + 1) & 63; if (g_hud_n < 64) g_hud_n++;
+                            break;
+                        }
+                    }
+            }
+        }
+        if (ip_hud_has(key, x, y)) { f->hud[i] = 1; continue; }
+        /* only on the playfield: lines where it has scrolled lately (the status bar's never do) */
+        if (!g_field_age[line] || g_field_age[line] > 120) { f->hud[i] = 1; continue; }
+        float fx = ip_object_frac(f, f->tag[i], 7);
+        f->sox[i] = (fx > 0 ? fx : 0) - f->ex[0][line];
+        if (f->sox[i] != 0) f->steady = 1;
+    }
 }
 
 /* called at vblank: the frame just drawn becomes "current", the one before it "previous" */
@@ -878,6 +1175,21 @@ static void ip_end_frame(void) {
         f->mixed_blank = on && off;
     }
     f->valid = f->lines >= 200;
+    /* this frame showed the sprite list built during the frame before: its objects are the pending
+     * ones; the list just built (and the objects as they are now) belong to the next frame */
+    memcpy(f->tag, g_tag_pending, sizeof f->tag);
+    /* a frame the game didn't finish shows a half-rebuilt list: a sprite keeps its tag only if it
+     * is exactly the entry the tag was noted for */
+    for (int i = 0; i < 128; i++)
+        if (memcmp(&g->ppu->oam[i * 2], g_list_pending + i * 4, 4) != 0) f->tag[i] = 0;
+    memcpy(f->objs, g_objs_pending, sizeof f->objs);
+    f->camx = g_cam_pending[0]; f->camy = g_cam_pending[1]; f->has_objs = g_pending_ok;
+    memcpy(g_tag_pending, g_tag_build, sizeof g_tag_pending);
+    memcpy(g_objs_pending, g->ram + IP_OBJ_BASE, sizeof g_objs_pending);
+    memcpy(g_list_pending, g->ram + 0x800, sizeof g_list_pending);
+    g_cam_pending[0] = g->ram[0x62] | (g->ram[0x63] << 8); g_cam_pending[1] = g->ram[0x64] | (g->ram[0x65] << 8);
+    g_pending_ok = 1;
+    ip_steady(f, g_ip[0]);
     IpFrame *t = g_ip[0]; g_ip[0] = g_ip[1]; g_ip[1] = t;   /* [0] = just completed, [1] = the one before */
 }
 
@@ -897,26 +1209,33 @@ static int ip_lerp(int prev, int cur, int mod, int maxd, float t) {
  * in whole pixels, so the in-between picture is made twice as wide: its even columns come from
  * a picture drawn with every half-way position rounded one way (phase 0) and its odd columns
  * from one rounded the other way (phase 1). Something on a whole pixel is identical in both, so
- * it keeps its exact shape; something half way across is drawn half a pixel over. */
-static int ip_off2(int prev, int cur, int mod, int maxd, float t, int *o2) {
-    int d = ((cur - prev + mod / 2) & (mod - 1)) - mod / 2;
-    if (d > maxd || d < -maxd) return 0;
-    *o2 = (int)lroundf(2.0f * d * (1.0f - t));       /* how far behind `cur`, in half pixels */
-    return 1;
-}
+ * it keeps its exact shape; something half way across is drawn half a pixel over. The same goes
+ * down the screen: then the picture is also twice as tall, its even rows drawn with vertical
+ * half-way positions rounded one way (vertical phase 0), its odd rows the other way. */
 #ifdef _MSC_VER
 #define HW_THREAD_LOCAL __declspec(thread)
 #else
 #define HW_THREAD_LOCAL __thread
 #endif
-static HW_THREAD_LOCAL int ip_half_seen;     /* this picture put something on a half pixel */
-/* a scroll register (content moves the other way): phase 0 rounds the scroll down */
-static int ip_scroll_ph(int prev, int cur, int mod, int maxd, float t, int phase) {
-    int o2;
-    if (phase < 0) return ip_lerp(prev, cur, mod, maxd, t);
-    if (!ip_off2(prev, cur, mod, maxd, t, &o2)) return cur;
-    ip_half_seen |= o2 & 1;
-    return (cur - ((o2 + 1) >> 1) + (phase ? (o2 & 1) : 0)) & (mod - 1);
+static HW_THREAD_LOCAL int ip_half_seen;     /* this picture put something on a half pixel: 1 across, 2 down */
+static HW_THREAD_LOCAL int ip_line_half;     /* the same, for the layers on the line being drawn */
+/* what the PPU's buffers hold from the picture drawn just before, of this same moment: its
+ * phases across and down (ip_buf_ok 0: nothing usable) */
+static HW_THREAD_LOCAL int ip_buf_ok, ip_buf_px, ip_buf_py;
+static HW_THREAD_LOCAL int ip_vlines;        /* lines with something half way down (counted while drawing) */
+/* a scroll register (content moves the other way): phase 0 rounds the scroll down. e0/e1: the
+ * steady path's offsets from the game's scroll at the previous and current frame (ip_steady).
+ * axis: 1 across, 2 down. */
+static int ip_scroll_ph(int prev, int cur, int mod, int maxd, float t, int phase, float e0, float e1, int axis) {
+    int d = ((cur - prev + mod / 2) & (mod - 1)) - mod / 2;
+    if (d > maxd || d < -maxd) return cur;
+    /* how far ahead of `cur` (rounded on the position itself, so the same position rounds the
+     * same way whichever frame it is reached from) */
+    float ahead = (e1 - (d + e1 - e0) * (1.0f - t));
+    if (phase < 0) return (cur + (int)floorf(ahead + 0.5f)) & (mod - 1);
+    int h2 = (int)floorf(2.0f * ahead + 0.5f);
+    if (h2 & 1) { ip_half_seen |= axis; ip_line_half |= axis; }
+    return (cur + (phase ? (h2 + 1) >> 1 : h2 >> 1)) & (mod - 1);
 }
 
 /* How far each sprite of the current frame moved since the previous one.
@@ -1053,8 +1372,11 @@ static void ip_sprite_motion(int xs[2][128], int ys[2][128], int sz[2][128], uin
 
 /* Draw the picture at fraction t (0..1) between `prev` and `cur` with PPU `p` (whose VRAM,
  * palette and widescreen sources are those of `cur`) into `out` (BGRX); returns its width.
- * p's registers, sprites and hooks are restored afterwards. */
-static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, int phase, uint8_t *out) {
+ * p's registers, sprites and hooks are restored afterwards. phase / vphase: which way half-way
+ * positions across / down are rounded (0 or 1), or -1: to whole pixels. */
+static int g_ip_noobj = -1;       /* test switch POPN_IP_NOOBJ: the old sprite-only motion */
+static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, int phase, int vphase, uint8_t *out) {
+    if (g_ip_noobj < 0) g_ip_noobj = getenv("POPN_IP_NOOBJ") != NULL;
     uint8_t regs[RG_SIZE]; uint16_t oam[0x100]; uint8_t high[0x20]; uint16_t cgram[0x100];
     memcpy(regs, (uint8_t *)p + RG_START, RG_SIZE);
     memcpy(cgram, p->cgram, sizeof cgram);
@@ -1066,6 +1388,8 @@ static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, i
     p->lineHook = NULL; p->wsNoRecord = true;
     p->wsFrameHook = ip_frame_hook;   /* keeps this frame's widescreen sources and blanking */
     p->wsUser = &blank;
+    uint8_t half_line[240];          /* lines a sprite on a half pixel covers: 1 across, 2 down */
+    memset(half_line, 0, sizeof half_line);
     /* Sprites: each moves part of the way along its object's motion (ip_sprite_motion);
      * anything without one stays where it is now. */
     {
@@ -1096,16 +1420,63 @@ static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, i
         int mdx_of[128], mdy_of[128], have_of[128];
         ip_sprite_motion(xs, ys, sz, key, prev->gfx, cur->gfx, p->objSize, wdx, wdy, mdx_of, mdy_of, have_of);
         for (int i = 0; i < 128; i++) {
-            int mdx = mdx_of[i], mdy = mdy_of[i], have = have_of[i];
-            int x = xs[1][i], y = ys[1][i];
-            if (have) {
-                if (phase < 0) x = (x - (int)lroundf(mdx * (1.0f - t))) & 511;
-                else {                                   /* screen position: phase 0 rounds up */
-                    int o2 = (int)lroundf(2.0f * mdx * (1.0f - t));
-                    ip_half_seen |= o2 & 1;
-                    x = (x - (phase ? ((o2 + 1) >> 1) : (o2 >> 1))) & 511;
+            float mdx = (float)mdx_of[i], mdy = (float)mdy_of[i]; int have = have_of[i];
+            /* A sprite whose motion the sprites themselves don't show (the list was reshuffled,
+             * or its artwork changed) moves with its object, when the previous frame had a sprite
+             * of the same object and size where that motion says it came from. The check matters:
+             * the game also draws screen-fixed sprites (the status bar) while an object is
+             * current. Known sprite motion is kept: it is whole pixels and lands exactly on the
+             * next real frame. */
+            float odx, ody;
+            if (!have && !g_ip_noobj && ys[1][i] < 240 && ip_object_motion(prev, cur, i, &odx, &ody)) {
+                float px = xs[1][i] - odx, py = ys[1][i] - ody;
+                for (int j = 0; j < 128; j++) {
+                    if (prev->tag[j] != cur->tag[i] || sz[0][j] != sz[1][i]) continue;
+                    float ex = fabsf(fmodf(xs[0][j] - px + 768.0f, 512.0f) - 256.0f);
+                    float ey = fabsf(fmodf(ys[0][j] - py + 384.0f, 256.0f) - 128.0f);
+                    if (ex <= 1.0f && ey <= 1.0f) {
+                        /* in whole pixels as the game drew it: the change of the objects' fractions
+                         * isn't part of the move from one drawn position to the other */
+                        float a0 = ip_object_frac(prev, cur->tag[i], 7), a1 = ip_object_frac(cur, cur->tag[i], 7);
+                        float b0 = ip_object_frac(prev, cur->tag[i], 11), b1 = ip_object_frac(cur, cur->tag[i], 11);
+                        mdx = lroundf(odx - (a0 >= 0 && a1 >= 0 ? a1 - a0 : 0));
+                        mdy = lroundf(ody - (b0 >= 0 && b1 >= 0 ? b1 - b0 : 0));
+                        have = 1; break;
+                    }
                 }
-                y = (y - (int)lroundf(mdy * (1.0f - t))) & 255;
+            }
+            /* steady motion: where this sprite really is drawn now (so1) and was drawn in the
+             * previous frame (so0), relative to the game's whole-pixel positions */
+            float so1 = cur->sox[i], so0 = 0;
+            if (have && !cur->hud[i] && prev->st_ok) {
+                int l0 = ys[1][i] - (int)mdy + 8; if (l0 < 1) l0 = 1; if (l0 > 239) l0 = 239;
+                float f0 = ip_object_frac(prev, cur->tag[i], 7);
+                if (f0 < 0) f0 = so1 + cur->ex[0][ys[1][i] + 8 < 1 ? 1 : ys[1][i] + 8 > 239 ? 239 : ys[1][i] + 8];
+                so0 = f0 - prev->ex[0][l0];
+            }
+            int x = xs[1][i], y = ys[1][i];
+            float ahead = have ? so1 - (mdx + so1 - so0) * (1.0f - t) : so1;   /* how far right of x */
+            int halfs = 0;                               /* 1: half way across, 2: down */
+            if (phase < 0) x = (x + (int)floorf(ahead + 0.5f)) & 511;
+            else {                                       /* screen position: phase 0 rounds up */
+                int h2 = (int)floorf(2.0f * ahead + 0.5f);
+                if (h2 & 1) halfs |= 1;
+                x = (x + (phase ? h2 >> 1 : (h2 + 1) >> 1)) & 511;
+            }
+            if (have) {
+                if (vphase < 0) y = (y - (int)lroundf(mdy * (1.0f - t))) & 255;
+                else {                                   /* the same down the screen */
+                    int h2 = (int)floorf(-2.0f * mdy * (1.0f - t) + 0.5f);
+                    if (h2 & 1) halfs |= 2;
+                    y = (y + (vphase ? h2 >> 1 : (h2 + 1) >> 1)) & 255;
+                }
+            }
+            if (y >= 224 && y < 240) halfs = 0;          /* parked off the screen */
+            ip_half_seen |= halfs;
+            if (halfs) {                                 /* the lines it covers (in either phase) */
+                static const int sizes[8][2] = {{8, 16}, {8, 32}, {8, 64}, {16, 32}, {16, 64}, {32, 64}, {16, 32}, {16, 32}};
+                int h = sizes[p->objSize & 7][sz[1][i]];
+                for (int k = -1; k <= h + 2; k++) { int l = (y + k) & 255; if (l < 240) half_line[l] |= (uint8_t)halfs; }
             }
             int hb = (i * 2) & 7, byte = i >> 2;
             p->oam[i * 2] = (uint16_t)((x & 0xff) | (y << 8));
@@ -1115,16 +1486,35 @@ static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, i
     int last = cur->lines;
     for (int line = 1; line <= last; line++) {
         if (!cur->has[line]) continue;
+        ip_line_half = 0;
         memcpy((uint8_t *)p + RG_START, cur->regs[line], RG_SIZE);
         if (cur->cg_n > 0) memcpy(p->cgram, cur->cg[cur->cg_of_line[line]], sizeof p->cgram);
+        p->wsBrightFine = -1;
         if (prev->has[line]) {
             const Ppu *pr = (const Ppu *)((const uint8_t *)prev->regs[line] - RG_START);
+            /* a fade: the brightness part of the way from the previous frame's to this one's */
+            if (pr->brightness != p->brightness && !p->forcedBlank && !pr->forcedBlank)
+                p->wsBrightFine = (int16_t)lroundf((pr->brightness & 15) * 17.0f * (1.0f - t) + (p->brightness & 15) * 17.0f * t);
             if (pr->mode == p->mode && !p->forcedBlank && !pr->forcedBlank)
                 for (int l = 0; l < 4; l++) {
                     if (p->mode == 7 && l == 0) continue;
-                    p->bgLayer[l].hScroll = (uint16_t)ip_scroll_ph(pr->bgLayer[l].hScroll & 0x3ff, p->bgLayer[l].hScroll & 0x3ff, 1024, 64, t, phase);
-                    p->bgLayer[l].vScroll = (uint16_t)ip_lerp(pr->bgLayer[l].vScroll & 0x3ff, p->bgLayer[l].vScroll & 0x3ff, 1024, 64, t);
+                    p->bgLayer[l].hScroll = (uint16_t)ip_scroll_ph(pr->bgLayer[l].hScroll & 0x3ff, p->bgLayer[l].hScroll & 0x3ff, 1024, 64, t, phase,
+                                                                       prev->ex[l][line], cur->ex[l][line], 1);
+                    p->bgLayer[l].vScroll = (uint16_t)(vphase < 0
+                        ? ip_lerp(pr->bgLayer[l].vScroll & 0x3ff, p->bgLayer[l].vScroll & 0x3ff, 1024, 64, t)
+                        : ip_scroll_ph(pr->bgLayer[l].vScroll & 0x3ff, p->bgLayer[l].vScroll & 0x3ff, 1024, 64, t, vphase, 0, 0, 2));
                 }
+        }
+        /* Another half-pixel picture of the same moment differs from the one still in the PPU's
+         * buffers only on lines where something sits half way along an axis whose rounding
+         * changed; the others are kept as they are. */
+        if ((ip_line_half | half_line[line]) & 2) ip_vlines++;
+        if (ip_buf_ok && line > 1) {
+            int h = ip_line_half | half_line[line];
+            if (!((phase != ip_buf_px && (h & 1)) || (vphase != ip_buf_py && (h & 2)))) {
+                if (line == p->wsCamLine) p->wsEdgeScroll = p->bgLayer[0].hScroll;
+                continue;
+            }
         }
         ppu_runLine(p, line);
     }
@@ -1133,6 +1523,7 @@ static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, i
     memcpy(p->cgram, cgram, sizeof cgram);
     memcpy(p->oam, oam, sizeof oam); memcpy(p->highOam, high, sizeof high);
     p->lineHook = line_hook; p->wsFrameHook = frame_hook; p->wsUser = user; p->wsBlank = blank; p->wsNoRecord = false;
+    p->wsBrightFine = -1;
     return w;
 }
 
@@ -1151,7 +1542,7 @@ void hw_interp_dump(int a, int b) {
 /* On the live PPU, right after a frame (used by the headless test). */
 int hw_render_interp(float t, uint8_t *out) {
     if (g_ip[0]->mixed_blank) return ppu_putPixelsWide(g->ppu, out);   /* as hw_snapshot_render */
-    return ip_render(g->ppu, g_ip[0], g_ip[1], t, -1, out);
+    return ip_render(g->ppu, g_ip[0], g_ip[1], t, -1, -1, out);
 }
 
 /* ---- snapshots for the display thread: triple-buffered so neither side ever waits ---- */
@@ -1183,7 +1574,11 @@ int hw_snapshot_publish(double t0_ms) {
     IpSnap *s = g_snap[g_snap_back];
     s->valid = hw_interp_ready();
     if (s->valid) {
-        memcpy(&s->ppu, g->ppu, sizeof(Ppu));
+        /* (not the 4:3 pixel buffer: the game doesn't use it, so it isn't even drawn) */
+        memcpy(&s->ppu, g->ppu, offsetof(Ppu, pixelBuffer));
+        memcpy((uint8_t *)&s->ppu + offsetof(Ppu, pixelBuffer) + sizeof g->ppu->pixelBuffer,
+               (const uint8_t *)g->ppu + offsetof(Ppu, pixelBuffer) + sizeof g->ppu->pixelBuffer,
+               sizeof(Ppu) - offsetof(Ppu, pixelBuffer) - sizeof g->ppu->pixelBuffer);
         s->ppu.lineHook = NULL; s->ppu.wsFrameHook = NULL; s->ppu.snes = NULL;
         for (int l = 0; l < 4; l++)
             if (s->ppu.wsSrc[l].valid && s->ppu.wsSrc[l].base) {
@@ -1232,29 +1627,83 @@ int hw_snapshot_render(double when_ms, uint8_t *out) {
     IpSnap *s = snap_pick(when_ms, &t);
     if (!s) return 0;
     if (t >= 0.999 || s->cur.mixed_blank) { memcpy(out, s->real, (size_t)s->real_w * 224 * 4); return s->real_w; }
-    return ip_render(&s->ppu, &s->cur, &s->prev, (float)(t < 0 ? 0 : t), -1, out);
+    return ip_render(&s->ppu, &s->cur, &s->prev, (float)(t < 0 ? 0 : t), -1, -1, out);
 }
 
-/* The same picture at half-pixel precision across: `out` (HW_FINE_MAX_W x 224) gets 2 x width
- * columns; returns the width in game pixels, or 0. Display thread only. */
-volatile int hw_fine_on = 1;            /* the display thread turns half pixels off when they don't fit in time */
+/* The same picture at half-pixel precision: `out` (HW_FINE_MAX_W x 448) gets 2 x width columns
+ * and 224 rows, or 448 rows when something sits half way down (then HW_FINE_TALL is added to the
+ * returned width). Returns the width in game pixels, or 0. Display thread only.
+ * Up to four pictures of the moment are drawn: phases across x down (0,0), (1,0), (0,1), (1,1);
+ * each after the first redraws only the lines that differ from the one before it. */
+volatile int hw_fine_on = 2;   /* 2: half pixels across and down, 1: across only, 0: none (the display
+                                * thread steps it down when the pictures don't fit in time) */
+volatile double hw_fine_budget_ms = 1e9;   /* the time the display thread has for drawing a picture */
 int hw_snapshot_render_fine(double when_ms, uint8_t *out) {
-    static uint8_t a[HW_WIDE_MAX_W * 224 * 4], b[HW_WIDE_MAX_W * 224 * 4];
+    static uint8_t pic[4][HW_WIDE_MAX_W * 224 * 4];
     double t;
     IpSnap *s = snap_pick(when_ms, &t);
     if (!s) return 0;
-    int w;
-    const uint8_t *pa = a, *pb = b;
-    if (t >= 0.999 || s->cur.mixed_blank) { w = s->real_w; pa = pb = s->real; }
+    int w, tall = 0;
+    const uint8_t *pp[4] = {pic[0], pic[1], pic[2], pic[3]};
+    /* the real frame's moment is shown as the game drew it, unless steady motion moved something */
+    if ((t >= 0.999 && !s->cur.steady) || s->cur.mixed_blank) { w = s->real_w; pp[0] = pp[1] = s->real; }
     else {
-        float ft = (float)(t < 0 ? 0 : t);
-        ip_half_seen = 0;
-        w = ip_render(&s->ppu, &s->cur, &s->prev, ft, 0, a);
-        /* the second picture differs only where something sits half way: often nothing does */
-        if (!ip_half_seen || !hw_fine_on || ip_render(&s->ppu, &s->cur, &s->prev, ft, 1, b) != w) pb = a;
+        float ft = (float)(t < 0 ? 0 : t > 1 ? 1 : t);
+        static int lvl = -2;     /* test switch POPN_FINE=0/1/2: that level instead of hw_fine_on */
+        if (lvl == -2) {
+            const char *e = getenv("POPN_FINE"); lvl = e ? atoi(e) : -1;
+            e = getenv("POPN_FINE_BUDGET"); if (e) hw_fine_budget_ms = atof(e);   /* test switch: ms */
+        }
+        int fine = lvl >= 0 ? lvl : hw_fine_on;
+        ip_half_seen = 0; ip_buf_ok = 0; ip_vlines = 0;
+        LARGE_INTEGER c0, c1, cf; QueryPerformanceCounter(&c0);
+        w = ip_render(&s->ppu, &s->cur, &s->prev, ft, 0, fine >= 2 ? 0 : -1, pic[0]);
+        QueryPerformanceCounter(&c1); QueryPerformanceFrequency(&cf);
+        int half = ip_half_seen;
+        int across = (half & 1) && fine >= 1, down = (half & 2) && fine >= 2;
+        /* Half pixels down redraw every line with something half way down, once or twice more
+         * (twice when there are half pixels across too). When that wouldn't fit in the time
+         * the display has for a picture, this one is drawn with whole pixels down. */
+        if (down) {
+            double one = (c1.QuadPart - c0.QuadPart) * 1000.0 / cf.QuadPart;   /* ms for a whole picture */
+            double est = one * (across ? 2.0 : 1.0) + one * ip_vlines / 224.0 * (across ? 2.0 : 1.0);
+            if (est > hw_fine_budget_ms) down = 0;
+        }
+        int done[4] = {1, 0, 0, 0};
+        ip_buf_ok = 1; ip_buf_px = 0; ip_buf_py = fine >= 2 ? 0 : -1;
+        /* the order keeps each picture one rounding change away from the one before it */
+        static const int order[3] = {1, 3, 2};
+        for (int k = 0; k < 3; k++) {
+            int q = order[k], px = q & 1, py = q >> 1;
+            if ((px && !across) || (py && !down)) continue;
+            if (ip_render(&s->ppu, &s->cur, &s->prev, ft, px, py ? 1 : (fine >= 2 ? 0 : -1), pic[q]) != w) break;
+            done[q] = 1; ip_buf_px = px; ip_buf_py = py ? 1 : (fine >= 2 ? 0 : -1);
+        }
+        ip_buf_ok = 0;
+        if (!done[1]) pp[1] = pp[0];
+        tall = down && done[2];
+        if (tall && !done[3]) pp[3] = pp[2];
+        {   /* test switch POPN_IP_REUSECHK: each picture drawn in full must be the same */
+            static int chk = -1; static unsigned n, bad;
+            if (chk < 0) chk = getenv("POPN_IP_REUSECHK") != NULL;
+            if (chk)
+                for (int q = 1; q < 4; q++) {
+                    if (!done[q]) continue;
+                    static uint8_t c[HW_WIDE_MAX_W * 224 * 4];
+                    (void)ip_render(&s->ppu, &s->cur, &s->prev, ft, q & 1, (q >> 1) ? 1 : (fine >= 2 ? 0 : -1), c);
+                    n++; if (memcmp(c, pic[q], (size_t)w * 224 * 4)) bad++;
+                    if (n % 100 == 0) fprintf(stderr, "reusechk %u pictures, %u differ\n", n, bad);
+                }
+        }
     }
-    const uint32_t *ua = (const uint32_t *)pa, *ub = (const uint32_t *)pb;
     uint32_t *uo = (uint32_t *)out;
-    for (int i = 0; i < w * 224; i++) { uo[i * 2] = ua[i]; uo[i * 2 + 1] = ub[i]; }
-    return w;
+    for (int r = 0; r < (tall ? 2 : 1); r++) {
+        const uint32_t *ua = (const uint32_t *)pp[r * 2], *ub = (const uint32_t *)pp[r * 2 + 1];
+        for (int y = 0; y < 224; y++) {
+            uint32_t *row = uo + ((size_t)(tall ? y * 2 + r : y) * w * 2);
+            const uint32_t *ra = ua + (size_t)y * w, *rb = ub + (size_t)y * w;
+            for (int x = 0; x < w; x++) { row[x * 2] = ra[x]; row[x * 2 + 1] = rb[x]; }
+        }
+    }
+    return w | (tall ? HW_FINE_TALL : 0);
 }

@@ -143,8 +143,48 @@ void snes_runCycles(Snes* snes, int cycles) {
     // if we go past 536, add 40 cycles for dram refersh
     cycles += 40;
   }
-  for(int i = 0; i < cycles; i += 2) {
-    snes_runCycle(snes);
+  // [recomp] Steps of 2 cycles. Only a few dots of a line do anything (line start, HDMA points, the
+  // line's picture, the H-timer, the line's end); between them a step just counts time, so those
+  // stretches go in one batch. The APU's (floating point) catch-up is still added step by step, so
+  // every value comes out exactly as from snes_runCycle one step at a time.
+  int steps = (cycles + 1) / 2;
+  const double apuStep = (snes->palTiming ? apuCyclesPerMasterPal : apuCyclesPerMaster) * 2.0;
+  while(steps > 0) {
+    if(snes->ocLeft > 0) {                     // an inserted line: time only
+      int n = (snes->ocLeft + 1) / 2; if(n > steps) n = steps;
+      snes->cycles += 2 * n; snes->ocLeft -= 2 * n; steps -= n;
+      continue;
+    }
+    int h = snes->hPos;
+    int lineEnd;
+    if(!snes->palTiming) lineEnd = (snes->vPos == 240 && !snes->ppu->evenFrame && !snes->ppu->frameInterlace) ? 1360 : 1364;
+    else lineEnd = (snes->vPos == 311 && !snes->ppu->evenFrame && snes->ppu->frameInterlace) ? 1368 : 1364;
+    int hIrq = snes->hIrqEnabled ? snes->hTimer * 4 : -1;
+    if(h == 0 || h == 16 || h == 512 || h == 1104 || h == hIrq || h >= lineEnd - 2) {
+      snes_runCycle(snes); steps--;
+      continue;
+    }
+    // the next dot that does something
+    int next = lineEnd - 2;
+    if(h < 16) next = 16; else if(h < 512) next = 512; else if(h < 1104 && next > 1104) next = 1104;
+    if(hIrq > h && hIrq < next) next = hIrq;
+    int n = (next - h) / 2; if(n > steps) n = steps;
+    // n plain steps (as snes_runCycle with hPos not at any of those dots)
+    for(int i = 0; i < n; i++) snes->apuCatchupCycles += apuStep;
+    snes->cycles += 2 * n;
+    bool condition = (
+      (snes->vIrqEnabled || snes->hIrqEnabled) &&
+      (snes->vPos == snes->vTimer || !snes->vIrqEnabled) &&
+      !snes->hIrqEnabled                          // (h is never hTimer * 4 here)
+    );
+    if(!snes->irqCondition && condition) {
+      snes->inIrq = true;
+      cpu_setIrq(snes->cpu, true);
+    }
+    snes->irqCondition = condition;
+    if(snes->autoJoyTimer > 0) { snes->autoJoyTimer -= 2 * n; if(snes->autoJoyTimer < 0) snes->autoJoyTimer = 0; }
+    snes->hPos += 2 * n;
+    steps -= n;
   }
 }
 

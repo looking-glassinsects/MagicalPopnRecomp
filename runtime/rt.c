@@ -29,6 +29,16 @@ void bus_write8(uint32_t addr, uint8_t v) {
     hw_write(addr, v);
     /* debug: POPN_WATCH=hex WRAM address -> on writes there, print the value and the top of the
      * 65816 stack (return addresses of the routines that led here) */
+    /* Magical Pop'n builds its sprite list at $0800 (4 bytes per sprite) while the object it is
+     * drawing sits at $00C0; noting that object for each sprite lets motion smoothing move every
+     * sprite by its object's own exact motion (hw.c, ip_render). One compare for other writes. */
+    if ((uint32_t)((addr & 0xFFFF) - 0x800) < 0x200u && !(addr & 3)) {
+        uint32_t b = addr >> 16;
+        if (b == 0x7E || !(b & 0x40)) {
+            const uint8_t *w = hw_wram();
+            hw_oam_tag((int)(((addr & 0xFFFF) - 0x800) >> 2), (uint16_t)(w[0xC0] | (w[0xC1] << 8)));
+        }
+    }
     static long watch = -2; static int shown;
     if (watch < 0) {                                  /* the usual case: one test per write */
         if (watch == -1) return;

@@ -64,9 +64,11 @@ static const int spriteSizes[8][2] = {
 static void ppu_handlePixel(Ppu* ppu, int x, int y);
 static int ppu_getPixel(Ppu* ppu, int x, int y, bool sub, int* r, int* g, int* b);
 static uint16_t ppu_getOffsetValue(Ppu* ppu, int col, int row);
-static int ppu_getPixelForBgLayer(Ppu* ppu, int x, int y, int layer, bool priority);
-static int ppu_getPixelForBgSource(Ppu* ppu, int x, int y, int layer, bool priority);
-static int ppu_decodeBgTile(Ppu* ppu, uint16_t tile, int x, int y, int layer, bool priority);
+static int ppu_getPixelForBgLayer(Ppu* ppu, int x, int y, int layer, int priority);
+static int ppu_getPixelForBgSource(Ppu* ppu, int x, int y, int layer, int priority);
+static void ppu_makeChunky(void);
+static void ppu_composeLine(Ppu* ppu, int y, int ws);
+static int ppu_decodeBgTile(Ppu* ppu, uint16_t tile, int x, int y, int layer, int priority);
 static void ppu_handleOPT(Ppu* ppu, int layer, int* lx, int* ly);
 static void ppu_calculateMode7Starts(Ppu* ppu, int y);
 static int ppu_getPixelForMode7(Ppu* ppu, int x, int layer, bool priority);
@@ -91,7 +93,10 @@ Ppu* ppu_init(Snes* snes) {
   ppu->snes = snes;
   ppu_setPixelOutputFormat(ppu, ppu_pixelOutputFormatBGRX);
   ppu->wsExtra = 0;      // [widescreen] off until the host enables it
+  ppu->wsBrightFine = -1; // [recomp]
   ppu->wsBgMask = 0xf;
+  ppu_makeChunky(); // [recomp]
+  ppu->noPixelBuffer = false; // [recomp]
   ppu->wsFrameHook = NULL;
   ppu->lineHook = NULL; // [recomp]
   ppu->lineUser = NULL;
@@ -304,6 +309,205 @@ void ppu_handleFrameStart(Ppu* ppu) {
 static PPU_THREAD_LOCAL unsigned tileGen;
 static PPU_THREAD_LOCAL struct { unsigned gen; uint32_t key; uint8_t px[8]; } tileCache[4];
 
+// [widescreen] test audit (host sets ppuAuditOn): which layers show at the 4:3 edges below the
+// status bar (bit = layer, main screen in the low byte, sub screen in the next), and how many
+// extension pixels were filled from the previous frame (holes). Reset by the host every frame.
+int ppuAuditOn;
+unsigned ppuAuditEdge, ppuAuditHoles;
+
+// [recomp] Per-line BG layer buffers. Each BG layer's line is decoded once, before its pixels are
+// composed: bgLine[layer][x + PPU_WS_MAX] is the pixel (cgram index, 0 = transparent) with the
+// tile's priority in bit 15, exactly what ppu_getPixel would fetch for that layer at x. Used in the
+// modes without offset-per-tile, hires or mode 7 (bgLineOn); ppu_getPixel then only looks pixels up.
+static PPU_THREAD_LOCAL uint16_t bgLine[4][256 + 2 * PPU_WS_MAX];
+static PPU_THREAD_LOCAL bool bgLineOn;
+// ...and what ppu_getPixel finds at each x for the main screen [0] and the sub screen [1] (when the
+// line uses it): the layer (0-3 BG, 4 sprites, 5 backdrop) and its pixel
+static PPU_THREAD_LOCAL uint8_t resLayer[2][256 + 2 * PPU_WS_MAX];
+static PPU_THREAD_LOCAL uint16_t resPix[2][256 + 2 * PPU_WS_MAX];
+static bool ppu_getWindowState(Ppu* ppu, int layer, int x);
+
+// the pixel of BG layer l at screen column x on line y, either priority (see ppu_decodeBgTile)
+static int ppu_bgPixelAny(Ppu* ppu, int x, int y, int l) {
+  bool outside = x < 0 || x > 255;
+  if(outside && !(ppu->wsBgMask & (1 << l)) && !ppu->wsSrc[l].valid) return 0;
+  int lx = x, ly = y;
+  if(ppu->bgLayer[l].mosaicEnabled && ppu->mosaicSize > 1) {
+    lx -= ((lx % ppu->mosaicSize) + ppu->mosaicSize) % ppu->mosaicSize;
+    ly -= (ly - ppu->mosaicStartLine) % ppu->mosaicSize;
+  }
+  lx += ppu->bgLayer[l].hScroll;
+  ly += ppu->bgLayer[l].vScroll;
+  if(outside && ppu->wsSrc[l].valid) return ppu_getPixelForBgSource(ppu, x + ppu->bgLayer[l].hScroll, ly, l, 2);
+  return ppu_getPixelForBgLayer(ppu, lx & 0x3ff, ly & 0x3ff, l, 2);
+}
+
+// planar to chunky: byte k of chunky[b] is bit 7 - k of b; of chunkyFlip[b], bit k
+static uint64_t chunky[256], chunkyFlip[256];
+static void ppu_makeChunky(void) {
+  for(int b = 0; b < 256; b++) {
+    uint64_t n = 0, f = 0;
+    for(int k = 0; k < 8; k++) { n |= (uint64_t) ((b >> (7 - k)) & 1) << (8 * k); f |= (uint64_t) ((b >> k) & 1) << (8 * k); }
+    chunky[b] = n; chunkyFlip[b] = f;
+  }
+}
+
+// n pixels of a tile's row, starting at layer column lx (lx & 7 + n <= 8), as ppu_decodeBgTile works
+// them out one by one (priority in bit 15); y: the layer row (vScroll applied, 10 bits)
+static inline void ppu_decodeBgChunk(Ppu* ppu, int l, uint16_t tile, int lx, int y, uint16_t* out, int n) {
+  const BgLayer* bg = &ppu->bgLayer[l];
+  int bitDepth = bitDepthsPerMode[ppu->mode][l];
+  int paletteSize = bitDepth > 4 ? 256 : bitDepth > 2 ? 16 : 4;
+  int tilePrio = (tile & 0x2000) ? 0x8000 : 0;
+  int paletteNum = (tile & 0x1c00) >> 10;
+  int row = (tile & 0x8000) ? 7 - (y & 0x7) : (y & 0x7);
+  int tileNum = tile & 0x3ff;
+  if(bg->bigTiles && (((bool) (lx & 8)) ^ ((bool) (tile & 0x4000)))) tileNum += 1;
+  if(bg->bigTiles && (((bool) (y & 8)) ^ ((bool) (tile & 0x8000)))) tileNum += 0x10;
+  if(ppu->mode == 0) paletteNum += 8 * l;
+  uint32_t planeAdr = (bg->tileAdr + ((tileNum & 0x3ff) * 4 * bitDepth) + row) & 0x7fff;
+  // the row's eight pixels at once: byte c of `pix` is the pixel in tile column c (bit 7 - c of each
+  // plane byte, or bit c when flipped; as ppu_decodeBgTile picks them one by one)
+  const uint64_t* T = (tile & 0x4000) ? chunkyFlip : chunky;
+  uint32_t p1 = ppu->vram[planeAdr];
+  uint64_t pix = T[p1 & 0xff] | (T[p1 >> 8] << 1);
+  if(bitDepth > 2) { uint32_t p2 = ppu->vram[(planeAdr + 8) & 0x7fff]; pix |= (T[p2 & 0xff] << 2) | (T[p2 >> 8] << 3); }
+  if(bitDepth > 4) {
+    uint32_t p3 = ppu->vram[(planeAdr + 16) & 0x7fff], p4 = ppu->vram[(planeAdr + 24) & 0x7fff];
+    pix |= (T[p3 & 0xff] << 4) | (T[p3 >> 8] << 5) | (T[p4 & 0xff] << 6) | (T[p4 >> 8] << 7);
+  }
+  int base = (paletteSize * paletteNum) | tilePrio;
+  for(int i = 0; i < n; i++) {
+    int v = (int) ((pix >> (8 * ((lx + i) & 7))) & 0xff);
+    out[i] = v ? (uint16_t) (base + v) : 0;
+  }
+}
+
+// The original 256 columns of a layer without mosaic, straight from VRAM, one tile row at a time:
+// the same values ppu_getPixelForBgLayer gives pixel by pixel.
+static void ppu_renderBgSpan(Ppu* ppu, int line, int l, uint16_t* out) {
+  const BgLayer* bg = &ppu->bgLayer[l];
+  int y = (line + bg->vScroll) & 0x3ff;
+  int h = bg->hScroll;
+  bool big = bg->bigTiles;
+  int tileBitsX = big ? 4 : 3, tileHighBitX = big ? 0x200 : 0x100;
+  int tileBitsY = big ? 4 : 3, tileHighBitY = big ? 0x200 : 0x100;
+  uint16_t rowAdr = bg->tilemapAdr + (((y >> tileBitsY) & 0x1f) << 5);
+  if((y & tileHighBitY) && bg->tilemapHigher) rowAdr += bg->tilemapWider ? 0x800 : 0x400;
+  for(int x = 0; x < 256; ) {
+    int lx = (x + h) & 0x3ff;
+    uint16_t adr = rowAdr + ((lx >> tileBitsX) & 0x1f);
+    if((lx & tileHighBitX) && bg->tilemapWider) adr += 0x400;
+    int n = 8 - (lx & 7); if(n > 256 - x) n = 256 - x;
+    ppu_decodeBgChunk(ppu, l, ppu->vram[adr & 0x7fff], lx, y, out + x, n);
+    x += n;
+  }
+}
+
+// [widescreen] Extension columns x0..x1-1 (outside 0..255) of a layer without
+// mosaic, from its tile source, one tile row at a time: the values ppu_getPixelForBgSource gives.
+static void ppu_renderBgSourceSpan(Ppu* ppu, int line, int l, int x0, int x1, uint16_t* out) {
+  const BgLayer* bg = &ppu->bgLayer[l];
+  int y = line + bg->vScroll;             // as ppu_getPixel passes it (not wrapped)
+  int tileBits = bg->bigTiles ? 4 : 3, tw = 1 << tileBits;
+  // the page (see ppu_getPixelForBgSource): worked out by one ordinary call, which caches it
+  if(x0 < x1) (void) ppu_getPixelForBgSource(ppu, x0 + bg->hScroll, y, l, 2);
+  int page = 0;
+  if(!ppu->wsSrc[l].vring && ppu->wsSrc[l].refCol >= 0 && ((bg->hScroll & 0x3ff) >> tileBits) != ppu->wsSrc[l].refCol)
+    page = ppu->wsPg[l];
+  int w = ppu->wsSrc[l].width;
+  int row = ppu->wsSrc[l].vring ? ((y & 0x3ff) >> tileBits) & 0x1f : (y >> tileBits) + ppu->wsSrc[l].rdelta;
+  bool rowOk = row >= 0 && row < ppu->wsSrc[l].rows;
+  const uint8_t* rowp = rowOk ? ppu->wsSrc[l].base + row * ppu->wsSrc[l].stride : NULL;
+  for(int x = x0; x < x1; ) {
+    int L = x + bg->hScroll;
+    int n = 8 - (L & 7); if(n > x1 - x) n = x1 - x;
+    if(!rowOk) { for(int i = 0; i < n; i++) out[x + i] = 0; x += n; continue; }
+    int col = (L >= 0 ? L / tw : -((-L + tw - 1) / tw)) + ppu->wsSrc[l].delta + page;
+    col = ((col % w) + w) % w;
+    uint16_t tile = rowp[col * 2] | (rowp[col * 2 + 1] << 8);
+    ppu_decodeBgChunk(ppu, l, tile, L & 0x3ff, y & 0x3ff, out + x, n);
+    x += n;
+  }
+}
+
+// What ppu_getPixel's search finds at each column, for the whole line in one pass: its winner is the
+// first entry of the mode's priority list whose layer is active there with a visible pixel of that
+// entry's priority. A column's BG pixel has one priority (its tile's) and its sprite pixel one, so
+// each layer can match only one entry there; the winner is the matching entry earliest in the list.
+static void ppu_resolveLine(Ppu* ppu, int ws, bool sub) {
+  int actMode = ppu->mode == 1 && ppu->bg3priority ? 8 : ppu->mode;
+  uint8_t rank[5][4];                      // [layer][priority]: place in the list (255: none / off)
+  memset(rank, 255, sizeof rank);
+  bool used[5] = {false, false, false, false, false};
+  for(int i = 0; i < layerCountPerMode[actMode]; i++) {
+    int L = layersPerMode[actMode][i], P = prioritysPerMode[actMode][i];
+    const Layer* ly = &ppu->layer[L];
+    if(!(sub ? ly->subScreenEnabled : ly->mainScreenEnabled) || ((ppu->wsDebugHide >> L) & 1)) continue;
+    if(rank[L][P] == 255) rank[L][P] = (uint8_t) i;
+    used[L] = true;
+  }
+  // windows: a layer is off where its window is on (outside 0..255: as at the nearest edge)
+  static PPU_THREAD_LOCAL uint8_t win[5][256];
+  bool windowed[5];
+  for(int L = 0; L < 5; L++) {
+    windowed[L] = used[L] && (sub ? ppu->layer[L].subScreenWindowed : ppu->layer[L].mainScreenWindowed);
+    if(windowed[L]) for(int x = 0; x < 256; x++) win[L][x] = ppu_getWindowState(ppu, L, x);
+  }
+  const uint8_t* op = ppu->objPriorityBuffer + PPU_WS_MAX;
+  const uint8_t* ox = ppu->objPixelBuffer + PPU_WS_MAX;
+  uint8_t* rl = resLayer[sub] + PPU_WS_MAX;
+  uint16_t* rp = resPix[sub] + PPU_WS_MAX;
+  for(int x = -ws; x < 256 + ws; x++) {
+    bool outside = x < 0 || x > 255;
+    int wx = x < 0 ? 0 : x > 255 ? 255 : x;
+    int best = 255, layer = 5, pixel = 0;
+    for(int L = 0; L < 4; L++) {
+      if(!used[L]) continue;
+      uint16_t v = bgLine[L][x + PPU_WS_MAX];
+      if(!v) continue;
+      int r = rank[L][v >> 15];
+      if(r >= best) continue;
+      if(outside && !(ppu->wsBgMask & (1 << L)) && !ppu->wsSrc[L].valid) continue;
+      if(windowed[L] && win[L][wx]) continue;
+      best = r; layer = L; pixel = v & 0x7fff;
+    }
+    if(used[4] && ox[x]) {
+      int r = rank[4][op[x] & 3];
+      if(r < best && !(windowed[4] && win[4][wx])) { best = r; layer = 4; pixel = ox[x]; }
+    }
+    rl[x] = (uint8_t) layer; rp[x] = (uint16_t) pixel;
+  }
+}
+
+static void ppu_renderBgLines(Ppu* ppu, int line, int ws) {
+  bgLineOn = ppu->mode == 0 || ppu->mode == 1 || ppu->mode == 3;
+  if(!bgLineOn || ppu->forcedBlank) return;
+  int actMode = ppu->mode == 1 && ppu->bg3priority ? 8 : ppu->mode;
+  for(int l = 0; l < 4; l++) {
+    bool used = false;
+    for(int i = 0; i < layerCountPerMode[actMode]; i++) used |= layersPerMode[actMode][i] == l;
+    if(!used || !(ppu->layer[l].mainScreenEnabled || ppu->layer[l].subScreenEnabled)) continue;
+    uint16_t* out = bgLine[l] + PPU_WS_MAX;
+    if(ppu->bgLayer[l].mosaicEnabled && ppu->mosaicSize > 1) {
+      for(int x = -ws; x < 256 + ws; x++) out[x] = (uint16_t) ppu_bgPixelAny(ppu, x, line, l);
+      continue;
+    }
+    ppu_renderBgSpan(ppu, line, l, out);
+    if(!ws) continue;
+    // the extension: from the tile source by spans (else pixel by pixel)
+    if(ppu->wsSrc[l].valid) {
+      ppu_renderBgSourceSpan(ppu, line, l, -ws, 0, out);
+      ppu_renderBgSourceSpan(ppu, line, l, 256, 256 + ws, out);
+    } else {
+      for(int x = -ws; x < 0; x++) out[x] = (uint16_t) ppu_bgPixelAny(ppu, x, line, l);
+      for(int x = 256; x < 256 + ws; x++) out[x] = (uint16_t) ppu_bgPixelAny(ppu, x, line, l);
+    }
+  }
+  ppu_resolveLine(ppu, ws, false);
+  if(ppu->addSubscreen || ppu->pseudoHires) ppu_resolveLine(ppu, ws, true);
+}
+
 void ppu_runLine(Ppu* ppu, int line) {
   // called for lines 1-224/239
   tileGen++; // [recomp] new line: the tile cache starts empty
@@ -342,7 +546,9 @@ void ppu_runLine(Ppu* ppu, int line) {
   // clear the whole wide line (the extension stays black when it isn't drawn)
   memset(&ppu->wsBuffer[row * PPU_WS_PITCH], 0, PPU_WS_PITCH);
   if(ppu->wsBlank) ws = 0;
-  for(int x = -ws; x < 256 + ws; x++) {
+  ppu_renderBgLines(ppu, line, ws);
+  if(bgLineOn && !ppu->forcedBlank && !ppu->wsDebugLayers) ppu_composeLine(ppu, line, ws);   // [recomp]
+  else for(int x = -ws; x < 256 + ws; x++) {
     ppu_handlePixel(ppu, x, line);
   }
   // [widescreen] test statistics: sprite pixels in 16 px bands either side of the 4:3 edges
@@ -361,6 +567,7 @@ void ppu_runLine(Ppu* ppu, int line) {
       int prow = (line - 1) + (ppu->evenFrame ? 239 : 0);
       for(int x = -ws; x < 256 + ws; x++) {
         if(x == 0) x = 256;
+        if(ppu->wsLineLayer[x + PPU_WS_MAX] == 5 && ppuAuditOn && !ppu->wsNoRecord) ppuAuditHoles++;
         if(ppu->wsLineLayer[x + PPU_WS_MAX] == 5)
           memcpy(&ppu->wsBuffer[row * PPU_WS_PITCH + (x + PPU_WS_MAX) * 4], &ppu->wsBuffer[prow * PPU_WS_PITCH + (x + PPU_WS_MAX) * 4], 4);
       }
@@ -401,11 +608,32 @@ void ppu_setPixelOutputFormat(Ppu* ppu, int pixelOutputFormat) {
 // [recomp] a 5-bit colour channel at each of the 16 brightness levels, as an 8-bit value
 // (exactly ((v << 3) | (v >> 2)) * brightness / 15, worked out once)
 static uint8_t brightTable[16][32];
+static uint8_t brightFineTable[256][32];   // [recomp] the same on a 0..255 scale (255 = full); 17 * b matches b
 static bool brightTableReady;
 static void ppu_makeBrightTable(void) {
   for(int br = 0; br < 16; br++)
     for(int v = 0; v < 32; v++) brightTable[br][v] = (uint8_t) (((v << 3) | (v >> 2)) * br / 15);
+  for(int br = 0; br < 256; br++)
+    for(int v = 0; v < 32; v++) brightFineTable[br][v] = (uint8_t) (((v << 3) | (v >> 2)) * br / 255);
   brightTableReady = true;
+}
+
+// [recomp] ppu_getPixel for a line already resolved (bgLineOn): the colour of what ppu_resolveLine found
+static inline int ppu_resolvedPixel(Ppu* ppu, int x, bool sub, int* r, int* g, int* b) {
+  int layer = resLayer[sub][x + PPU_WS_MAX], pixel = resPix[sub][x + PPU_WS_MAX];
+  int actMode = ppu->mode == 1 && ppu->bg3priority ? 8 : ppu->mode;
+  if(ppu->directColor && layer < 4 && bitDepthsPerMode[actMode][layer] == 8) {
+    *r = ((pixel & 0x7) << 2) | ((pixel & 0x100) >> 7);
+    *g = ((pixel & 0x38) >> 1) | ((pixel & 0x200) >> 8);
+    *b = ((pixel & 0xc0) >> 3) | ((pixel & 0x400) >> 8);
+  } else {
+    uint16_t color = ppu->cgram[pixel & 0xff];
+    *r = color & 0x1f;
+    *g = (color >> 5) & 0x1f;
+    *b = (color >> 10) & 0x1f;
+  }
+  if(layer == 4 && pixel < 0xc0) layer = 6; // sprites with palette color < 0xc0
+  return layer;
 }
 
 static void ppu_handlePixel(Ppu* ppu, int x, int y) {
@@ -413,7 +641,7 @@ static void ppu_handlePixel(Ppu* ppu, int x, int y) {
   int g = 0, g2 = 0;
   int b = 0, b2 = 0;
   if(!ppu->forcedBlank) {
-    int mainLayer = ppu_getPixel(ppu, x, y, false, &r, &g, &b);
+    int mainLayer = bgLineOn ? ppu_resolvedPixel(ppu, x, false, &r, &g, &b) : ppu_getPixel(ppu, x, y, false, &r, &g, &b);
     ppu->wsLineLayer[x + PPU_WS_MAX] = (uint8_t)mainLayer;
     if(ppu->wsDebugLayers && (x < 0 || x > 255)) {   // [widescreen] debug: color by source layer
       static const uint8_t dc[7][3] = {{31,0,0},{0,31,0},{0,0,31},{31,31,0},{31,31,31},{31,0,31},{31,31,31}};
@@ -438,7 +666,11 @@ static void ppu_handlePixel(Ppu* ppu, int x, int y) {
       (ppu->preventMathMode == 1 && !colorWindowState)
     );
     if((mathEnabled && ppu->addSubscreen) || ppu->pseudoHires || ppu->mode == 5 || ppu->mode == 6) {
-      secondLayer = ppu_getPixel(ppu, x, y, true, &r2, &g2, &b2);
+      secondLayer = bgLineOn ? ppu_resolvedPixel(ppu, x, true, &r2, &g2, &b2) : ppu_getPixel(ppu, x, y, true, &r2, &g2, &b2);
+    }
+    if(ppuAuditOn && (x == 0 || x == 255) && y > 48 && !ppu->wsNoRecord) {   // [widescreen] test audit
+      if(mainLayer < 4) ppuAuditEdge |= 1u << mainLayer;
+      if(secondLayer < 4 && mathEnabled) ppuAuditEdge |= 0x100u << secondLayer;
     }
     // TODO: subscreen pixels can be clipped to black as well
     // TODO: math for subscreen pixels (add/sub sub to main)
@@ -473,13 +705,13 @@ ws_store:;
   // [widescreen] one pixel per dot for the wide output
   uint8_t* ws = &ppu->wsBuffer[row * PPU_WS_PITCH + (x + PPU_WS_MAX) * 4];
   if(!brightTableReady) ppu_makeBrightTable();
-  const uint8_t* bt = brightTable[ppu->brightness & 15];
+  const uint8_t* bt = ppu->wsBrightFine >= 0 ? brightFineTable[ppu->wsBrightFine & 255] : brightTable[ppu->brightness & 15];
   int fmt = ppu->pixelOutputFormat;
   uint8_t ob = bt[b & 31], og = bt[g & 31], or_ = bt[r & 31];
   ws[0 + fmt] = ob;
   ws[1 + fmt] = og;
   ws[2 + fmt] = or_;
-  if(x < 0 || x > 255) return;
+  if(x < 0 || x > 255 || ppu->noPixelBuffer) return;
   uint8_t* pb = &ppu->pixelBuffer[row * 2048 + x * 8 + fmt];
   pb[0] = bt[b2 & 31];
   pb[1] = bt[g2 & 31];
@@ -487,6 +719,87 @@ ws_store:;
   pb[4] = ob;
   pb[5] = og;
   pb[6] = or_;
+}
+
+// [recomp] ppu_handlePixel for every column of a resolved line (bgLineOn, not forced blank, no
+// debug colouring): the same arithmetic, with what stays the same along a line worked out once
+static void ppu_composeLine(Ppu* ppu, int y, int ws) {
+  if(!brightTableReady) ppu_makeBrightTable();
+  const uint8_t* bt = ppu->wsBrightFine >= 0 ? brightFineTable[ppu->wsBrightFine & 255] : brightTable[ppu->brightness & 15];
+  int fmt = ppu->pixelOutputFormat;
+  int row = (y - 1) + (ppu->evenFrame ? 0 : 239);
+  uint8_t* wsRow = &ppu->wsBuffer[row * PPU_WS_PITCH];
+  uint8_t* pbRow = &ppu->pixelBuffer[row * 2048];
+  bool colorWindowOn = ppu->windowLayer[5].window1enabled || ppu->windowLayer[5].window2enabled;
+  bool hires = ppu->pseudoHires;          // (modes 5/6 never come here)
+  bool audit = ppuAuditOn && y > 48 && !ppu->wsNoRecord;
+  bool noPb = ppu->noPixelBuffer;
+  for(int x = -ws; x < 256 + ws; x++) {
+    int r, g, b, r2 = 0, g2 = 0, b2 = 0;
+    int mainLayer = ppu_resolvedPixel(ppu, x, false, &r, &g, &b);
+    ppu->wsLineLayer[x + PPU_WS_MAX] = (uint8_t) mainLayer;
+    bool colorWindowState = colorWindowOn && ppu_getWindowState(ppu, 5, x < 0 ? 0 : x > 255 ? 255 : x);
+    if(
+      ppu->clipMode == 3 ||
+      (ppu->clipMode == 2 && colorWindowState) ||
+      (ppu->clipMode == 1 && !colorWindowState)
+    ) {
+      r = 0;
+      g = 0;
+      b = 0;
+    }
+    int secondLayer = 5; // backdrop
+    bool mathEnabled = mainLayer < 6 && ppu->mathEnabled[mainLayer] && !(
+      ppu->preventMathMode == 3 ||
+      (ppu->preventMathMode == 2 && colorWindowState) ||
+      (ppu->preventMathMode == 1 && !colorWindowState)
+    );
+    if((mathEnabled && ppu->addSubscreen) || hires) {
+      secondLayer = ppu_resolvedPixel(ppu, x, true, &r2, &g2, &b2);
+    }
+    if(audit && (x == 0 || x == 255)) {   // [widescreen] test audit
+      if(mainLayer < 4) ppuAuditEdge |= 1u << mainLayer;
+      if(secondLayer < 4 && mathEnabled) ppuAuditEdge |= 0x100u << secondLayer;
+    }
+    if(mathEnabled) {
+      if(ppu->subtractColor) {
+        r -= (ppu->addSubscreen && secondLayer != 5) ? r2 : ppu->fixedColorR;
+        g -= (ppu->addSubscreen && secondLayer != 5) ? g2 : ppu->fixedColorG;
+        b -= (ppu->addSubscreen && secondLayer != 5) ? b2 : ppu->fixedColorB;
+      } else {
+        r += (ppu->addSubscreen && secondLayer != 5) ? r2 : ppu->fixedColorR;
+        g += (ppu->addSubscreen && secondLayer != 5) ? g2 : ppu->fixedColorG;
+        b += (ppu->addSubscreen && secondLayer != 5) ? b2 : ppu->fixedColorB;
+      }
+      if(ppu->halfColor && (secondLayer != 5 || !ppu->addSubscreen)) {
+        r >>= 1;
+        g >>= 1;
+        b >>= 1;
+      }
+      if(r > 31) r = 31;
+      if(g > 31) g = 31;
+      if(b > 31) b = 31;
+      if(r < 0) r = 0;
+      if(g < 0) g = 0;
+      if(b < 0) b = 0;
+    }
+    if(!hires) {
+      r2 = r; g2 = g; b2 = b;
+    }
+    uint8_t ob = bt[b & 31], og = bt[g & 31], or_ = bt[r & 31];
+    uint8_t* ws4 = wsRow + (x + PPU_WS_MAX) * 4 + fmt;
+    ws4[0] = ob;
+    ws4[1] = og;
+    ws4[2] = or_;
+    if(x < 0 || x > 255 || noPb) continue;
+    uint8_t* pb = pbRow + x * 8 + fmt;
+    pb[0] = bt[b2 & 31];
+    pb[1] = bt[g2 & 31];
+    pb[2] = bt[r2 & 31];
+    pb[4] = ob;
+    pb[5] = og;
+    pb[6] = or_;
+  }
 }
 
 static int ppu_getPixel(Ppu* ppu, int x, int y, bool sub, int* r, int* g, int* b) {
@@ -498,6 +811,9 @@ static int ppu_getPixel(Ppu* ppu, int x, int y, bool sub, int* r, int* g, int* b
   int pixel = 0;
   bool outside = x < 0 || x > 255; // [widescreen]
   int wx = x < 0 ? 0 : x > 255 ? 255 : x;
+  if(bgLineOn) {   // [recomp] found for the whole line already (ppu_resolveLine)
+    layer = resLayer[sub][x + PPU_WS_MAX]; pixel = resPix[sub][x + PPU_WS_MAX];
+  } else
   for(int i = 0; i < layerCountPerMode[actMode]; i++) {
     int curLayer = layersPerMode[actMode][i];
     int curPriority = prioritysPerMode[actMode][i];
@@ -515,7 +831,11 @@ static int ppu_getPixel(Ppu* ppu, int x, int y, bool sub, int* r, int* g, int* b
     if(outside && curLayer < 4 && !(ppu->wsBgMask & (1 << curLayer)) && !ppu->wsSrc[curLayer].valid) layerActive = false;
     if((ppu->wsDebugHide >> curLayer) & 1) layerActive = false;   // [widescreen] debug: layer hidden (bit 4 = sprites)
     if(layerActive) {
-      if(curLayer < 4) {
+      if(curLayer < 4 && bgLineOn) {
+        // [recomp] bg layer: from this line's buffer (ppu_renderBgLines)
+        uint16_t v = bgLine[curLayer][x + PPU_WS_MAX];
+        pixel = (v && (v >> 15) == curPriority) ? (v & 0x7fff) : 0;
+      } else if(curLayer < 4) {
         // bg layer
         int lx = x;
         int ly = y;
@@ -618,7 +938,7 @@ static uint16_t ppu_getOffsetValue(Ppu* ppu, int col, int row) {
   return ppu->vram[tilemapAdr & 0x7fff];
 }
 
-static int ppu_getPixelForBgLayer(Ppu* ppu, int x, int y, int layer, bool priority) {
+static int ppu_getPixelForBgLayer(Ppu* ppu, int x, int y, int layer, int priority) {
   // figure out address of tilemap word and read it
   bool wideTiles = ppu->bgLayer[layer].bigTiles || ppu->mode == 5 || ppu->mode == 6;
   int tileBitsX = wideTiles ? 4 : 3;
@@ -633,7 +953,7 @@ static int ppu_getPixelForBgLayer(Ppu* ppu, int x, int y, int layer, bool priori
 }
 
 // [widescreen] fetch the tile word from wsSrc instead of VRAM; x is unwrapped (may be < 0 or > 1023)
-static int ppu_getPixelForBgSource(Ppu* ppu, int x, int y, int layer, bool priority) {
+static int ppu_getPixelForBgSource(Ppu* ppu, int x, int y, int layer, int priority) {
   int tileBits = ppu->bgLayer[layer].bigTiles ? 4 : 3;
   int tw = 1 << tileBits;
   // a band of lines scrolled elsewhere than where the source was matched (a scene drawn in bands
@@ -658,7 +978,8 @@ static int ppu_getPixelForBgSource(Ppu* ppu, int x, int y, int layer, bool prior
               int col = (((c0 + k + ppu->wsSrc[layer].delta + cand) % w) + w) % w;
               score += (uint16_t)(rowp[col * 2] | (rowp[col * 2 + 1] << 8)) == ppu->vram[(mapRow + ((c0 + k) & 0x1f)) & 0x7fff];
             }
-            if(getenv("POPN_WS_PAGES")) fprintf(stderr, "page L%d y%d h%d c0 %d ref %d row %d cand %d score %d\n", layer, y, h, c0, ref, r, cand, score);
+            static int pagesDbg = -1; if(pagesDbg < 0) pagesDbg = getenv("POPN_WS_PAGES") != NULL;   // debug
+            if(pagesDbg) fprintf(stderr, "page L%d y%d h%d c0 %d ref %d row %d cand %d score %d\n", layer, y, h, c0, ref, r, cand, score);
             if(score > best) { best = score; page = cand; }
           }
         }
@@ -676,10 +997,12 @@ static int ppu_getPixelForBgSource(Ppu* ppu, int x, int y, int layer, bool prior
   return ppu_decodeBgTile(ppu, tile, x & 0x3ff, y & 0x3ff, layer, priority);
 }
 
-static int ppu_decodeBgTile(Ppu* ppu, uint16_t tile, int x, int y, int layer, bool priority) {
+static int ppu_decodeBgTile(Ppu* ppu, uint16_t tile, int x, int y, int layer, int priority) {
   bool wideTiles = ppu->bgLayer[layer].bigTiles || ppu->mode == 5 || ppu->mode == 6;
-  // check priority, get palette
-  if(((bool) (tile & 0x2000)) != priority) return 0; // wrong priority
+  // check priority, get palette ([recomp] priority 2: either; the tile's priority is then returned
+  // in bit 15 of a visible pixel, for the per-line layer buffers)
+  int tilePrio = (tile & 0x2000) ? 1 : 0;
+  if(priority < 2 && tilePrio != priority) return 0; // wrong priority
   int paletteNum = (tile & 0x1c00) >> 10;
   // figure out position within tile
   int row = (tile & 0x8000) ? 7 - (y & 0x7) : (y & 0x7);
@@ -717,7 +1040,8 @@ static int ppu_decodeBgTile(Ppu* ppu, uint16_t tile, int x, int y, int layer, bo
   }
   int pixel = px[col];
   // return cgram index, or 0 if transparent, palette number in bits 10-8 for 8-color layers
-  return pixel == 0 ? 0 : paletteSize * paletteNum + pixel;
+  if(pixel == 0) return 0;
+  return (paletteSize * paletteNum + pixel) | (priority == 2 && tilePrio ? 0x8000 : 0);
 }
 
 static void ppu_calculateMode7Starts(Ppu* ppu, int y) {

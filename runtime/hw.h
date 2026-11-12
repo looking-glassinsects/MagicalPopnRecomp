@@ -44,7 +44,6 @@ int      hw_save_state(uint8_t *buf);
 int      hw_load_state(uint8_t *buf, int size);
 
 void     hw_end_frame(void);                  /* catch up the APU */
-void     hw_get_pixels(uint8_t *bgrx512x480); /* BGRX, 512x480 (lines 16..463 visible) */
 /* Widescreen: render `extra` more columns on each side (0 = off). profile 1 = Magical Pop'n level-map source, 0 = generic. */
 void     hw_set_widescreen(int extra, int profile);
 void     hw_set_sprite_limit(int on);
@@ -69,10 +68,16 @@ int      hw_render_interp(float t, uint8_t *bgrx);    /* frame at t in (0,1) bet
 int      hw_snapshot_publish(double t0_ms);           /* after a frame: hand it to the display thread */
 void     hw_set_extra_time(int lines, double budget_ms);   /* extra CPU lines per frame for busy frames (0 = original slowdown) */
 void     hw_lag_stats(uint32_t *lag_frames, uint32_t *lines);   /* frames the game didn't finish in time; lines inserted */
+void     hw_oam_tag(int sprite, uint16_t object);      /* the game wrote sprite `sprite` while drawing `object` */
 int      hw_ws_state_size(void);                       /* widescreen bookkeeping kept in save states */
 void     hw_ws_state_save(uint8_t *buf);
 int      hw_ws_state_load(const uint8_t *buf, int size);
 int      hw_snapshot_render(double when_ms, uint8_t *bgrx);   /* display thread: picture for that moment */
 #define  HW_FINE_MAX_W (2 * HW_WIDE_MAX_W)
-extern volatile int hw_fine_on;        /* 0: draw whole pixels only (too slow for this screen) */
-int      hw_snapshot_render_fine(double when_ms, uint8_t *bgrx); /* the same at half-pixel precision across (2 x width columns); returns the width */
+#define  HW_FINE_MAX_H 448
+#define  HW_FINE_TALL 0x10000          /* in hw_snapshot_render_fine's result: the picture has 448 rows */
+extern volatile int hw_fine_on;        /* 2: half pixels across and down, 1: across only, 0: whole pixels (too slow for this screen) */
+extern volatile double hw_fine_budget_ms;   /* time the display thread has to draw a picture */
+/* the same at half-pixel precision (2 x width columns; 448 rows if HW_FINE_TALL is set in the
+ * result, else 224); returns the width (plus HW_FINE_TALL) */
+int      hw_snapshot_render_fine(double when_ms, uint8_t *bgrx);

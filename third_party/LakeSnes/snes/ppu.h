@@ -157,6 +157,8 @@ struct Ppu {
   int wsCamLine;                // [widescreen] line whose scroll is the camera's (the level edges follow it)
   uint8_t wsDebugHide;         // [widescreen] debug: BG layers (bit n = BG n+1) not drawn at all
   bool wsNoRecord;             // [widescreen] set while drawing an in-between picture
+  int16_t wsBrightFine;        // [recomp] -1, or a brightness on a 0..255 scale used instead of the
+                               // register's 16 steps (in-between pictures of a fade)
   uint16_t wsEpoch;            // [widescreen] current load (see wsVramEpoch)
   bool wsInLoad;
   int wsDbgMapWrites, wsDbgBright;
@@ -167,6 +169,7 @@ struct Ppu {
   uint16_t wsLineV[2][240];     // [widescreen] ...and vertical scroll (tests)
   int wsPgY[4], wsPgH[4], wsPg[4]; // [widescreen] page found for the line being drawn (cache)
   uint8_t wsLineLayer[256 + 2 * PPU_WS_MAX]; // [widescreen] layer shown per dot on the current line   // debug: color extension pixels by the layer that produced them
+  bool noPixelBuffer;          // [recomp] the host only uses the wide output (wsBuffer): pixelBuffer isn't written
   struct {
     bool valid;
     const uint8_t* base;  // tile word for (row r, column c) at base[r * stride + c * 2]
