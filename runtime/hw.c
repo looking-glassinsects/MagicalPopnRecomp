@@ -23,7 +23,21 @@ static void ws_reset_anchors(void);
 
 static void ip_end_frame(void);
 static void ip_invalidate(void);
-static void vblank_tramp(void *user) { (void)user; ip_end_frame(); if (g_vblank_cb) g_vblank_cb(); }
+static LARGE_INTEGER g_frame_t0, g_qpf;      /* when emulating the current frame began */
+static double g_extra_budget_ms;             /* 0 = no time limit on extra lines */
+static void vblank_tramp(void *user) {
+    (void)user; ip_end_frame();
+    if (g_vblank_cb) g_vblank_cb();
+    QueryPerformanceCounter(&g_frame_t0);    /* after the host's pacing and input: the frame starts here */
+}
+/* another extra line only while this frame's emulation has taken less than the budget: a slow
+ * PC removes less of the slowdown instead of missing its own frames */
+static bool extra_time_allowed(void *user) {
+    (void)user;
+    if (g_extra_budget_ms <= 0) return true;
+    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    return (double)(now.QuadPart - g_frame_t0.QuadPart) * 1000.0 / (double)g_qpf.QuadPart < g_extra_budget_ms;
+}
 
 int hw_init(const uint8_t *rom, size_t size, void (*vblank_cb)(void)) {
     g = snes_init();
@@ -714,6 +728,15 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
 }
 
 void hw_set_sprite_limit(int on) { g->ppu->noSpriteLimit = !on; }
+/* Extra CPU time for frames the game can't finish (see ocMax in snes.h): up to `lines` lines per
+ * frame, 0 = the original's timing, slowdown included. */
+void hw_set_extra_time(int lines, double budget_ms) {
+    g->ocMax = lines < 0 ? 0 : lines > 16768 ? 16768 : lines;
+    g_extra_budget_ms = budget_ms;
+    QueryPerformanceFrequency(&g_qpf); QueryPerformanceCounter(&g_frame_t0);
+    g->ocAllow = extra_time_allowed; g->ocUser = NULL;
+}
+void hw_lag_stats(uint32_t *lag_frames, uint32_t *lines) { *lag_frames = g->ocLagFrames; *lines = g->ocLinesTotal; }
 uint32_t hw_sprite_overflow_lines(int *max_sprites, int *max_slivers) {
     *max_sprites = g->ppu->spriteMaxOnLine; *max_slivers = g->ppu->sliverMaxOnLine;
     return g->ppu->spriteOverflowLines;

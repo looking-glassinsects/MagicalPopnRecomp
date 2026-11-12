@@ -20,7 +20,7 @@ void settings_defaults(Settings *s) {
     s->scale = 3; s->fullscreen = 0; s->aspect = ASPECT_PIXEL; s->widescreen = WS_OFF; s->integer_scale = 0; s->smooth = 0;
     s->show_fps = 0; s->volume = 100; s->mute = 0; s->pause_unfocused = 1; s->ff_speed = FF_4X;
     s->language = (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_JAPANESE) ? LANG_JA : LANG_EN;
-    s->vsync = 1; s->low_latency = 0; s->motion_smooth = 60; s->scanlines = 0; s->sprite_limit = 0; s->mute_unfocused = 0; s->resume = 0; s->slot = 1; s->check_updates = 1;
+    s->vsync = 1; s->low_latency = 0; s->motion_smooth = 60; s->scanlines = 0; s->sprite_limit = 0; s->mute_unfocused = 0; s->resume = 0; s->slot = 1; s->check_updates = 1; s->no_slowdown = 1;
     s->win_x = s->win_y = -32000;
     settings_reset_keys(s);
 }
@@ -44,7 +44,7 @@ void settings_load(const char *path) {
     GETI("display", "motion_fps", motion_smooth);
     GETI("display", "scanlines", scanlines); GETI("display", "sprite_limit", sprite_limit); GETI("sound", "mute_unfocused", mute_unfocused);
     GETI("general", "resume", resume);     GETI("general", "slot", slot);
-    GETI("general", "check_updates", check_updates);
+    GETI("general", "check_updates", check_updates); GETI("general", "no_slowdown", no_slowdown);
     GETI("window", "x", win_x);            GETI("window", "y", win_y);
     for (int i = 0; i < BTN_COUNT; i++) s->keys[i] = GetPrivateProfileIntA("keys", KEY_NAMES[i], s->keys[i], path);
 #undef GETI
@@ -53,7 +53,7 @@ void settings_load(const char *path) {
     s->ff_speed = clampi(s->ff_speed, 0, FF_COUNT - 1); s->slot = clampi(s->slot, 1, 9);
     /* on/off values index tables in the menu: keep them 0 or 1 whatever the file says */
     int *flags[] = {&s->fullscreen, &s->integer_scale, &s->smooth, &s->show_fps, &s->mute, &s->pause_unfocused,
-                    &s->vsync, &s->low_latency, &s->scanlines, &s->sprite_limit, &s->mute_unfocused, &s->resume, &s->check_updates};
+                    &s->vsync, &s->low_latency, &s->scanlines, &s->sprite_limit, &s->mute_unfocused, &s->resume, &s->check_updates, &s->no_slowdown};
     for (int i = 0; i < (int)(sizeof flags / sizeof flags[0]); i++) *flags[i] = *flags[i] != 0;
     for (int i = 0; i < BTN_COUNT; i++) s->keys[i] = clampi(s->keys[i], 0, 255);
     s->motion_smooth = s->motion_smooth >= 90 ? 120 : 60;   /* 240 (older versions) becomes 120 */
@@ -74,7 +74,7 @@ void settings_save(const char *path) {
     WritePrivateProfileStringA("display", "motion_smoothing", s->motion_smooth > 60 ? "1" : "0", path);
     PUTI("display", "scanlines", scanlines); PUTI("display", "sprite_limit", sprite_limit); PUTI("sound", "mute_unfocused", mute_unfocused);
     PUTI("general", "resume", resume);     PUTI("general", "slot", slot);
-    PUTI("general", "check_updates", check_updates);
+    PUTI("general", "check_updates", check_updates); PUTI("general", "no_slowdown", no_slowdown);
     PUTI("window", "x", win_x);            PUTI("window", "y", win_y);
     for (int i = 0; i < BTN_COUNT; i++) PUTI("keys", KEY_NAMES[i], keys[i]);
 #undef PUTI

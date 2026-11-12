@@ -390,6 +390,15 @@ static void on_vblank_headless(void) {
         static int size = -1; if (size < 0) size = getenv("POPN_DUMP_SIZE") ? (int)strtol(getenv("POPN_DUMP_SIZE"), NULL, 0) : 0x2000;
         if (df) { uint16_t h = hw_bg_hscroll(0); fwrite(&h, 2, 1, df); fwrite(hw_wram(), 1, (size_t)size, df); }
     }
+    {   /* debug: POPN_LAG_DEBUG=1 prints, for every frame the game didn't finish in time, where it was */
+        static int on = -1; static uint32_t last_lag;
+        if (on < 0) on = getenv("POPN_LAG_DEBUG") != NULL;
+        if (on) {
+            uint32_t lag, lines; hw_lag_stats(&lag, &lines);
+            if (lag != last_lag) fprintf(stderr, "lag f%u loop_pc %06X in_irq %d\n", g_frames_run, rt_loop_pc, rt.in_irq);
+            last_lag = lag;
+        }
+    }
     int n = hw_take_samples(g_native, 4096);
     if (g_wav) { fwrite(g_native, 4, n, g_wav); g_wav_frames += n; }
     if (g_bot) hw_set_buttons(bot_input(g_frames_run));
@@ -615,6 +624,12 @@ static int smoothing_update(void) {
     return want;
 }
 
+/* "Remove slowdown": up to three extra frames' worth of CPU time for a frame the game can't
+ * finish, as long as emulating it stays under 11 ms (of the 16.6 ms a frame has) */
+#define EXTRA_TIME_LINES 786
+#define EXTRA_TIME_BUDGET_MS 11.0
+static void apply_extra_time(void) { hw_set_extra_time(g_set.no_slowdown ? EXTRA_TIME_LINES : 0, EXTRA_TIME_BUDGET_MS); }
+
 static void quit_game(void) {
     settings_save(g_ini);
     if (g_set.resume && !g_quit_after_capture) {         /* remember where we are, then quit */
@@ -654,6 +669,7 @@ static void run_menu(void) {
     settings_save(g_ini);
     plat_clear_keys();
     hw_set_widescreen(settings_ws_extra(), 1); hw_set_sprite_limit(g_set.sprite_limit);
+    apply_extra_time();
     choose_pacing();
     g_next_t = plat_now_ms(); g_exit_t = 0;
 }
@@ -877,6 +893,7 @@ int main(int argc, char **argv) {
         rt.on_frame = on_vblank_headless;
         hw_set_widescreen(g_ws_override >= 0 ? g_ws_override : 0, 1);
         hw_set_sprite_limit(getenv("POPN_SPRITE_LIMIT") ? atoi(getenv("POPN_SPRITE_LIMIT")) : g_set.sprite_limit);
+        hw_set_extra_time(getenv("POPN_EXTRA_TIME") ? atoi(getenv("POPN_EXTRA_TIME")) : 0, 0);   /* tests: original timing unless asked */
         if (wav_path && (g_wav = fopen(wav_path, "wb")) != NULL) {
             static const uint8_t hdr[44] = {'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,2,0,
                 0x28,0x7D,0,0, 0xA0,0xF4,0x01,0, 4,0,16,0,'d','a','t','a',0,0,0,0};   /* 32040 Hz */
@@ -890,6 +907,7 @@ int main(int argc, char **argv) {
         audio_init();
         rt.on_frame = on_vblank_window;
         hw_set_widescreen(settings_ws_extra(), 1); hw_set_sprite_limit(g_set.sprite_limit);
+        apply_extra_time();
         choose_pacing();
         g_next_t = plat_now_ms();
         if (g_set.resume && read_state(0)) plat_toast(tr(T_RESUMED));
@@ -937,6 +955,8 @@ int main(int argc, char **argv) {
                g_frames_run, GEN_FUNC_COUNT, rt.stats.dispatches, rt.stats.unwinds, rt.stats.interp_calls, rt.stats.interp_steps);
         { int ms, mt; unsigned ov = (unsigned)hw_sprite_overflow_lines(&ms, &mt);
           printf("sprite_overflow_lines %u busiest_line sprites %d slivers %d\n", ov, ms, mt); }
+        { uint32_t lag, lines; hw_lag_stats(&lag, &lines);
+          printf("lag_frames %u extra_lines %u\n", lag, lines); }
         if (g_wav) {
             uint32_t bytes = g_wav_frames * 4, riff = 36 + bytes;
             fseek(g_wav, 4, SEEK_SET); fwrite(&riff, 4, 1, g_wav);

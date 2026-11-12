@@ -67,6 +67,8 @@ void     hw_interp_enable(int on);
 int      hw_interp_ready(void);                       /* previous and current frame recorded */
 int      hw_render_interp(float t, uint8_t *bgrx);    /* frame at t in (0,1) between them; returns width */
 int      hw_snapshot_publish(double t0_ms);           /* after a frame: hand it to the display thread */
+void     hw_set_extra_time(int lines, double budget_ms);   /* extra CPU lines per frame for busy frames (0 = original slowdown) */
+void     hw_lag_stats(uint32_t *lag_frames, uint32_t *lines);   /* frames the game didn't finish in time; lines inserted */
 int      hw_ws_state_size(void);                       /* widescreen bookkeeping kept in save states */
 void     hw_ws_state_save(uint8_t *buf);
 int      hw_ws_state_load(const uint8_t *buf, int size);

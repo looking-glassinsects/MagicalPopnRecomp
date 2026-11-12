@@ -31,7 +31,7 @@ enum {
     S_BTN_UP, S_BTN_DOWN, S_BTN_LEFT, S_BTN_RIGHT, S_BTN_A, S_BTN_B, S_BTN_X, S_BTN_Y, S_BTN_L, S_BTN_R,
     S_BTN_START, S_BTN_SELECT,
     S_PAD, S_PAD_SETUP, S_PAD_NONE, S_PAD_DONE, S_PAD_NOPAD, S_PAD_HINT,
-    S_PAD_B, S_PAD_A, S_PAD_Y, S_PAD_X, S_PAD_FF, S_PAD_MENU, S_UPDATES, S_COUNT
+    S_PAD_B, S_PAD_A, S_PAD_Y, S_PAD_X, S_PAD_FF, S_PAD_MENU, S_UPDATES, S_NOSLOW, S_COUNT
 };
 
 static const char *STR[S_COUNT][LANG_COUNT] = {
@@ -98,6 +98,7 @@ static const char *STR[S_COUNT][LANG_COUNT] = {
     {"Fast-forward (hold)", "早送り（長押し）"},
     {"Open the menu", "メニューを開く"},
     {"Check for updates", "アップデートの確認"},
+    {"Remove slowdown", "処理落ちをなくす"},
 };
 
 static const char *TSTR[T_COUNT][LANG_COUNT] = {
@@ -130,7 +131,7 @@ const char *tr(int id) { return TSTR[id][g_set.language]; }
 /* ---------------------------------------------------------------- items */
 enum { PG_MAIN, PG_VIDEO, PG_AUDIO, PG_KEYS, PG_COUNT };
 enum {
-    I_RESUME, I_SAVE, I_LOAD, I_SLOT, I_CONTINUE, I_PG_VIDEO, I_PG_AUDIO, I_PG_KEYS, I_LANGUAGE, I_UPDATES,
+    I_RESUME, I_SAVE, I_LOAD, I_SLOT, I_CONTINUE, I_NOSLOW, I_PG_VIDEO, I_PG_AUDIO, I_PG_KEYS, I_LANGUAGE, I_UPDATES,
     I_SCREENSHOT, I_RESET, I_QUIT, I_BACK,
     I_SCALE, I_FULLSCREEN, I_VSYNC, I_LOWLAT, I_MOTION, I_WIDESCREEN, I_PIXEL, I_INTEGER, I_SMOOTH, I_SCANLINES, I_SPRLIMIT, I_SHOWFPS,
     I_VOLUME, I_MUTE, I_MUTE_BG, I_PAUSE_BG,
@@ -144,6 +145,8 @@ static const char *NOTE[][LANG_COUNT] = {
     [I_LOAD] = {"Return to the state saved in the selected slot (F9).", "選択中のスロットの状態に戻ります (F9)。"},
     [I_SLOT] = {"Nine slots. F6 / F7 also switch slots in game.", "スロットは9つ。ゲーム中は F6 / F7 でも切り替えられます。"},
     [I_CONTINUE] = {"Quit any time and start again right where you were.", "終了しても次回はその場所から再開します。"},
+    [I_NOSLOW] = {"On: busy scenes run at full speed. Off: they slow down like the original game.",
+                  "オン：重い場面も通常の速さで動きます。オフ：オリジナルと同じように遅くなります。"},
     [I_PG_VIDEO] = {"Window, fullscreen, widescreen, vsync and picture options.", "ウィンドウ、フルスクリーン、ワイド画面、垂直同期など。"},
     [I_PG_AUDIO] = {"Volume and background behaviour.", "音量と非アクティブ時の動作。"},
     [I_PG_KEYS] = {"Change keyboard keys and fast-forward speed.", "キー割り当てと早送り速度。"},
@@ -182,7 +185,7 @@ static const char *NOTE[][LANG_COUNT] = {
 };
 
 static int is_option(int id) {
-    return id == I_SLOT || id == I_CONTINUE || id == I_LANGUAGE || id == I_UPDATES || (id >= I_SCALE && id <= I_PAUSE_BG) || id == I_FFSPEED;
+    return id == I_SLOT || id == I_CONTINUE || id == I_NOSLOW || id == I_LANGUAGE || id == I_UPDATES || (id >= I_SCALE && id <= I_PAUSE_BG) || id == I_FFSPEED;
 }
 static int is_subpage(int id) { return id == I_PG_VIDEO || id == I_PG_AUDIO || id == I_PG_KEYS; }
 
@@ -225,7 +228,7 @@ static int page_items(int page, int *out) {
     int n = 0;
     switch (page) {
     case PG_MAIN:
-        out[n++] = I_RESUME; out[n++] = I_SAVE; out[n++] = I_LOAD; out[n++] = I_SLOT; out[n++] = I_CONTINUE;
+        out[n++] = I_RESUME; out[n++] = I_SAVE; out[n++] = I_LOAD; out[n++] = I_SLOT; out[n++] = I_CONTINUE; out[n++] = I_NOSLOW;
         out[n++] = I_PG_VIDEO; out[n++] = I_PG_AUDIO; out[n++] = I_PG_KEYS; out[n++] = I_LANGUAGE; out[n++] = I_UPDATES;
         out[n++] = I_SCREENSHOT; out[n++] = I_RESET; out[n++] = I_QUIT; break;
     case PG_VIDEO:
@@ -262,6 +265,7 @@ static const char *label_of(int id) {
     case I_LOAD: return S(S_LOAD);
     case I_SLOT: return S(S_SLOT);
     case I_CONTINUE: return S(S_CONTINUE);
+    case I_NOSLOW: return S(S_NOSLOW);
     case I_PG_VIDEO: return S(S_PG_VIDEO);
     case I_PG_AUDIO: return S(S_PG_AUDIO);
     case I_PG_KEYS: return S(S_PG_KEYS);
@@ -306,6 +310,7 @@ static void value_of(int id, char *v, int size) {
         snprintf(v, size, "%d   %s", g_set.slot, info[0] ? info : S(S_EMPTY)); break;
     }
     case I_CONTINUE: snprintf(v, size, "%s", onoff[g_set.resume]); break;
+    case I_NOSLOW: snprintf(v, size, "%s", onoff[g_set.no_slowdown]); break;
     case I_LANGUAGE: snprintf(v, size, "%s", g_set.language == LANG_JA ? "日本語" : "English"); break;
     case I_UPDATES: snprintf(v, size, "%s", onoff[g_set.check_updates]); break;
     case I_SCALE: snprintf(v, size, "%dx", g_set.scale); break;
@@ -353,6 +358,7 @@ static void change(int id, int d) {
     switch (id) {
     case I_SLOT: g_set.slot = cycle(g_set.slot - 1, 9, d) + 1; break;
     case I_CONTINUE: g_set.resume = !g_set.resume; break;
+    case I_NOSLOW: g_set.no_slowdown = !g_set.no_slowdown; break;
     case I_LANGUAGE: g_set.language = cycle(g_set.language, LANG_COUNT, d); break;
     case I_UPDATES: g_set.check_updates = !g_set.check_updates; break;
     case I_SCALE: g_set.scale = clampi(g_set.scale + d, 1, 6); if (g_set.fullscreen) g_set.fullscreen = 0; plat_apply_display(); break;

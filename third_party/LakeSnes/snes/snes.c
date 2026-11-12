@@ -36,6 +36,9 @@ Snes* snes_init(void) {
   snes->input1 = input_init(snes);
   snes->input2 = input_init(snes);
   snes->palTiming = false;
+  snes->ocAllow = NULL; snes->ocUser = NULL;
+  snes->ocMax = 0; snes->ocLeft = 0; snes->ocHeld = 0; snes->ocPolls = 0; snes->ocApuReads = 0; // [recomp]
+  snes->ocLagFrames = 0; snes->ocLinesTotal = 0;
   snes->vblankHook = NULL; // [recomp]
   snes->vblankUser = NULL;
   return snes;
@@ -87,6 +90,7 @@ void snes_reset(Snes* snes, bool hard) {
   snes->divideResult = 0x101;
   snes->fastMem = false;
   snes->openBus = 0;
+  snes->ocLeft = 0; snes->ocHeld = 0; snes->ocPolls = 0; snes->ocApuReads = 0; // [recomp]
 }
 
 void snes_handleState(Snes* snes, StateHandler* sh) {
@@ -129,6 +133,12 @@ void snes_runFrame(Snes* snes) {
 }
 
 void snes_runCycles(Snes* snes, int cycles) {
+  // [recomp] inside an inserted line nothing happens but time passing: take it in one step
+  if(snes->ocLeft >= cycles) {
+    snes->ocLeft -= cycles;
+    snes->cycles += cycles;
+    return;
+  }
   if(snes->hPos + cycles >= 536 && snes->hPos < 536) {
     // if we go past 536, add 40 cycles for dram refersh
     cycles += 40;
@@ -150,6 +160,32 @@ void snes_syncCycles(Snes* snes, bool start, int syncCycles) {
 }
 
 static void snes_runCycle(Snes* snes) {
+  // [recomp] an inserted line (see ocMax): CPU time only
+  if(snes->ocLeft > 0) {
+    snes->cycles += 2;
+    snes->ocLeft -= 2;
+    return;
+  }
+  if(snes->hPos == 0) {
+    if(snes->vPos == 225) {
+      // The picture's last line has ended. A game that is ready for the next frame is polling
+      // $4212 for vblank by now (several reads per line); one that isn't is still working.
+      bool busy = snes->ocPolls < 4;
+      // ...unless it is waiting for the sound chip (a sound upload, handshake by handshake):
+      // that chip stands still in an inserted line, so more CPU time wouldn't get it anywhere
+      bool apuWait = snes->ocApuReads >= 8;
+      if(busy && !apuWait && snes->ocHeld < snes->ocMax && (!snes->ocAllow || snes->ocAllow(snes->ocUser))) {
+        snes->ocHeld++; snes->ocLinesTotal++;
+        snes->ocPolls = 0; snes->ocApuReads = 0;
+        snes->ocLeft = 1364 - 2;
+        snes->cycles += 2;
+        return;
+      }
+      if(busy) snes->ocLagFrames++;
+      snes->ocHeld = 0;
+    }
+    snes->ocPolls = 0; snes->ocApuReads = 0;
+  }
   snes->apuCatchupCycles += (snes->palTiming ? apuCyclesPerMasterPal : apuCyclesPerMaster) * 2.0;
   snes->cycles += 2;
   // check for h/v timer irq's
@@ -261,6 +297,7 @@ uint8_t snes_readBBus(Snes* snes, uint8_t adr) {
     return ppu_read(snes->ppu, adr);
   }
   if(adr < 0x80) {
+    snes->ocApuReads++; // [recomp]
     snes_catchupApu(snes); // catch up the apu before reading
     return snes->apu->outPorts[adr & 0x3];
   }
@@ -318,6 +355,7 @@ static uint8_t snes_readReg(Snes* snes, uint16_t adr) {
       return val | (snes->openBus & 0x7f);
     }
     case 0x4212: {
+      snes->ocPolls++; // [recomp]
       uint8_t val = (snes->autoJoyTimer > 0);
       val |= (snes->hPos < 4 || snes->hPos >= 1096) << 6;
       val |= snes->inVblank << 7;

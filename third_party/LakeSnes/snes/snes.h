@@ -36,6 +36,19 @@ struct Snes {
   uint64_t syncCycle;
   // cpu handling
   double apuCatchupCycles;
+  // [recomp] extra CPU time: when the game is still busy as the picture's last line ends (it
+  // isn't polling $4212 for vblank yet), lines are inserted before vblank starts, up to ocMax per
+  // frame, in which only the CPU runs: no picture, no timers, no sound clock. The game then
+  // finishes its frame in time instead of skipping one (the original's slowdown).
+  int ocMax;          // most lines to insert per frame (0 = off: original timing)
+  bool (*ocAllow)(void* user);   // optional: may another line be inserted now? (host time budget)
+  void* ocUser;
+  int ocLeft;         // master cycles left of the line being inserted
+  int ocHeld;         // lines inserted so far this frame
+  int ocPolls;        // $4212 reads during the current line
+  int ocApuReads;     // sound port reads during the current line (the game is waiting for the sound chip)
+  uint32_t ocLagFrames;    // frames that started vblank with the game still busy (statistics)
+  uint32_t ocLinesTotal;   // lines inserted in all (statistics)
   // nmi / irq
   bool hIrqEnabled;
   bool vIrqEnabled;
