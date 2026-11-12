@@ -4,7 +4,6 @@
 """
 import pathlib
 import struct
-import subprocess
 import sys
 import zlib
 

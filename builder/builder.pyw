@@ -13,7 +13,6 @@ import sys
 import threading
 import traceback
 import unicodedata
-import webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 

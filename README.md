@@ -29,7 +29,7 @@ program, with a small menu for window size, fullscreen, smoothing, FPS, volume, 
 > The builder reads it on your PC and produces `MagicalPopn.exe`.
 
 > [!NOTE]
-> This is version **0.9.5**, so there is a slight chance of bugs. If you find one, please
+> This is version **0.9.5.1**, so there is a slight chance of bugs. If you find one, please
 > [open an issue](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/new), ideally with a save state (F5) or a screenshot (F12).
 
 ## Native 16:9 widescreen
@@ -155,7 +155,7 @@ saved automatically.
 
 | Page | Settings |
 |---|---|
-| **Main** | resume, save/load state, save slot, continue on launch, language (English / 日本語), check for updates, screenshot, reset (press twice), quit (press twice), and the three pages below |
+| **Main** | resume, save/load state, save slot, continue on launch, **remove slowdown**, language (English / 日本語), check for updates, screenshot, reset (press twice), quit (press twice), and the three pages below |
 | **Video** | window size, display mode, **VSync**, **low latency**, **motion smoothing** (60 / 120 fps), **widescreen** (off / 16:9 / 16:10 / 21:9), pixel shape (square / TV 8:7 / stretch), integer scaling, smoothing, scanlines, **sprite limit**, FPS counter |
 | **Sound** | volume, mute, mute in background, pause in background |
 | **Controls** | the controller in use, controller setup, rebind every key, fast-forward speed, reset to defaults |
@@ -171,6 +171,12 @@ repository. If there is one, a box offers to update. Choose Yes and the game dow
 builder (about 90 MB), rebuilds itself from the ROM it was made from (a minute or two) and starts
 again, with your saves and settings kept. Nothing about you or your game is sent. Updating this way
 works from version 0.9.4.1 onwards.
+
+**Remove slowdown** (on by default): when the game can't finish a frame in time, as in busy
+scenes, it gets extra processor time instead of slowing down like the original. Only the game's
+own work gets the extra time; the picture, timers and music stay exactly on time. About three
+quarters of the slowdown is gone; very long loading moments can still slow down briefly. Turn it
+off for the original timing, slowdown included.
 
 **Continue on launch** (off by default) saves your exact place when you quit and resumes it the
 next time you start. Settings are saved in `settings.ini` next to the game, and save states
@@ -257,6 +263,16 @@ These are tracked on the [Issues](https://github.com/looking-glassinsects/Magica
 
 > [!WARNING]
 > A save state made before 0.9.5 and loaded inside a narrow castle room shows its 16:9 sides with the older method until you leave the room. Saves made with 0.9.5 or later don't have this.
+
+<details>
+<summary><b>New in 0.9.5.1</b></summary>
+
+<br>
+
+- New: **Remove slowdown** in the F1 menu, on by default. Busy scenes run at full speed instead of slowing down like the original. About three quarters of the slowdown is gone; very long loading moments can still slow down briefly. Turn it off for the original timing.
+- More of the game is compiled ahead of time, so a few rooms with many enemies run more smoothly.
+
+</details>
 
 <details>
 <summary><b>New in 0.9.5</b></summary>

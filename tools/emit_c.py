@@ -187,7 +187,6 @@ def gen_insn(pc, d, m, x, label_of, out, calls):
     bank = d["bank"]
     pb = bank >> 16
     e = lambda s: out.append("    " + s)
-    ret_addr = (pc + d["size"] - 1) & 0xFFFF   # what JSR/JSL push
 
     if mn in ("LDA", "LDX", "LDY"):
         r, w = ("a", wm) if mn == "LDA" else (REGS[mn[2]], wx)

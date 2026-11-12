@@ -4,8 +4,7 @@ Starts at the reset/NMI/IRQ vectors plus entry points discovered by the trace pr
 (runtime/trace_main.c) and by pointer harvesting, follows code while tracking the M/X
 register-width flags (needed to decode immediate operand sizes and to emit fixed-width C).
 """
-import json
-from collections import defaultdict, deque
+from collections import deque
 from snes import lorom_to_file, file_to_lorom
 
 # fmt: off
