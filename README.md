@@ -29,7 +29,7 @@ program, with a small menu for window size, fullscreen, smoothing, FPS, volume, 
 > The builder reads it on your PC and produces `MagicalPopn.exe`.
 
 > [!NOTE]
-> This is version **0.9.5.1**, so there is a slight chance of bugs. If you find one, please
+> This is version **0.9.6**, so there is a slight chance of bugs. If you find one, please
 > [open an issue](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/new), ideally with a save state (F5) or a screenshot (F12).
 
 ## Native 16:9 widescreen
@@ -202,8 +202,10 @@ in `states\`.
   every 6. A display thread redraws the frame with the console's own
   graphics chip, with each layer's scroll position and every sprite placed where they are at
   that exact moment between the last two frames. Pixel art stays crisp: nothing is blended or
-  smeared. In-between pictures are drawn at half-pixel precision across, so a background that
-  scrolls one pixel per frame still gets a step in between. Pictures are timed by a clock locked to the monitor's real refresh signal, so each
+  smeared. In-between pictures are drawn at half-pixel precision, across and down, so a
+  background that scrolls one pixel per frame still gets a step in between. Sprites move with
+  the game objects they belong to, the camera follows a steady path instead of the game's
+  uneven whole-pixel steps, and brightness fades pass through in-between levels. Pictures are timed by a clock locked to the monitor's real refresh signal, so each
   one stays on screen for exactly the same number of refreshes (two each at 120 fps on a
   240 Hz screen). Each picture is drawn a few milliseconds before its refresh and presented
   just after it, so a slow moment in the graphics driver doesn't make it miss its refresh. It
@@ -236,7 +238,12 @@ so they show the real level.
   they were only ever drawn 256 pixels wide.
 - Each area is wide from its very first frame, and nothing is drawn beyond the area's own edges.
 - Narrow castle rooms, which the game streams into video memory a column at a time, are drawn
-  from video memory as it fills, so their sides match the real room.
+  from video memory as it fills, so their sides match the real room. So are small rooms whose
+  picture can't be found in the level map.
+- Back layers that the game streams a column at a time, such as the dark forest's far trees, are
+  drawn from the game's own copy of the whole layer.
+- Nothing is drawn that the original game doesn't have: where there is no level, the sides stay
+  black.
 - Enemies, items, doors and effects are drawn in the extra columns too: the game's sprite-drawing
   helpers are patched (found by code signature, so this works for any version of the game) to
   cull against the wide screen instead of the 4:3 one. Enemies stay active from 128 px left of
@@ -263,6 +270,18 @@ These are tracked on the [Issues](https://github.com/looking-glassinsects/Magica
 
 > [!WARNING]
 > A save state made before 0.9.5 and loaded inside a narrow castle room shows its 16:9 sides with the older method until you leave the room. Saves made with 0.9.5 or later don't have this.
+
+<details>
+<summary><b>New in 0.9.6</b></summary>
+
+<br>
+
+- Motion smoothing is smoother: half-pixel steps down as well as across, sprites that move with their objects, a steady camera, and smooth brightness fades.
+- The game draws about twice as fast or more, with exactly the same picture and sound, so motion smoothing keeps up on 240 Hz screens.
+- 16:9: the dark forest's far trees reach both edges, castle rooms lost stray columns at the sides, and small rooms that used to fall back to 4:3 show their real walls.
+- Fixed a rare case where reading the ROM header could compute garbage.
+
+</details>
 
 <details>
 <summary><b>New in 0.9.5.1</b></summary>
