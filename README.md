@@ -13,7 +13,6 @@
   <a href="#quick-start">Quick start</a> &emsp;
   <a href="#playing">Playing</a> &emsp;
   <a href="#widescreen">Widescreen</a> &emsp;
-  <a href="#known-issues">Known issues</a> &emsp;
   <a href="#how-it-works">How it works</a> &emsp;
   <a href="#credits">Credits</a>
 </p>
@@ -41,7 +40,7 @@ Levels are rendered wider rather than stretched, so the pixels keep their shape 
 > [!TIP]
 > 16:9 is now tested room by room: every area of the game was walked from end to end, and each
 > side column was compared pixel by pixel with what the original 4:3 picture shows at the same
-> spot. A few small glitches remain (see [Known issues](#known-issues)).
+> spot. A few small glitches remain.
 
 ## Quick start
 
@@ -255,92 +254,6 @@ so they show the real level.
 > At 21:9, enemies can still appear a few pixels inside the far right edge.
 
 The game's own text comes from the ROM you build from, so a translated ROM gives an English game.
-
-## Known issues
-
-These are tracked on the [Issues](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues) tab, where you can add details or screenshots.
-
-| # | Issue | Area |
-|---|---|---|
-| 1 | [Boomerangs get stuck on the screen](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/2) | 16:9 |
-| 2 | [A few rooms (such as the ice palace) still show small glitches in the 16:9 side columns](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/3) | 16:9 |
-| 3 | [Side columns change while going through the tubes](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/6) | 16:9 |
-| 4 | [Mace ghosts and clones its sprite](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/7) | Motion smoothing |
-| 5 | [Sprite flickers on the spring in the first area](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/8) | Graphics |
-
-> [!WARNING]
-> A save state made before 0.9.5 and loaded inside a narrow castle room shows its 16:9 sides with the older method until you leave the room. Saves made with 0.9.5 or later don't have this.
-
-<details>
-<summary><b>New in 0.9.6</b></summary>
-
-<br>
-
-- Motion smoothing is smoother: half-pixel steps down as well as across, sprites that move with their objects, a steady camera, and smooth brightness fades.
-- The game draws about twice as fast or more, with exactly the same picture and sound, so motion smoothing keeps up on 240 Hz screens.
-- 16:9: the dark forest's far trees reach both edges, castle rooms lost stray columns at the sides, and small rooms that used to fall back to 4:3 show their real walls.
-- Fixed a rare case where reading the ROM header could compute garbage.
-
-</details>
-
-<details>
-<summary><b>New in 0.9.5.1</b></summary>
-
-<br>
-
-- New: **Remove slowdown** in the F1 menu, on by default. Busy scenes run at full speed instead of slowing down like the original. About three quarters of the slowdown is gone; very long loading moments can still slow down briefly. Turn it off for the original timing.
-- More of the game is compiled ahead of time, so a few rooms with many enemies run more smoothly.
-
-</details>
-
-<details>
-<summary><b>New in 0.9.5</b></summary>
-
-<br>
-
-- Motion smoothing is smoother: in-between pictures are now drawn at half-pixel precision across, so slow-scrolling backgrounds such as the forest's far trees move evenly instead of in steps.
-- The game runs faster: each frame takes about 20% less time in busy scenes, with the picture unchanged.
-- Castle rooms no longer show a patch of the wrong wall at the sides in 16:9 when the view moves up or down.
-- Save states now remember what the current room has drawn, so narrow castle rooms look right at the sides straight after loading. Older saves still load.
-- Sound comes back by itself if the output device goes away, for example when headphones are unplugged.
-- Messages in the corner and the FPS counter use the menu's font.
-
-</details>
-
-<details>
-<summary><b>Fixed in 0.9.4.2</b></summary>
-
-<br>
-
-- With motion smoothing on, doors no longer shake when you walk in front of them ([#9](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/9)).
-- With motion smoothing on, the falling stars no longer shift against the background while the screen scrolls.
-
-</details>
-
-<details>
-<summary><b>New in 0.9.4.1</b></summary>
-
-<br>
-
-- The game checks for a new release when it starts and can update itself: one click downloads the new builder, rebuilds the game and starts it again.
-- The stone giant fix no longer changes the game's timing, in 4:3 or 16:9.
-- A damaged save state file can no longer crash the game when loading.
-
-</details>
-
-<details>
-<summary><b>Fixed in 0.9.4</b></summary>
-
-<br>
-
-- Black level-end bars no longer flash or jump in layered scenes (such as the rooftops) when the view moves up or down.
-- The throne room before the final boss ([#4](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/4)) and 17 other narrow rooms (castle, chapter 6, gargoyle hall) now show the correct graphics in the side columns ([#3](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/3)).
-- Background walls made of one repeated tile no longer turn black in the side columns.
-- Doors and three other kinds of objects are now drawn in the side columns.
-- The stone giant's head bounces across the whole 16:9 width, up to the ends of its arena ([#1](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/1)).
-- 74 more routines are compiled ahead of time instead of running through the interpreter.
-
-</details>
 
 ## How it works
 
