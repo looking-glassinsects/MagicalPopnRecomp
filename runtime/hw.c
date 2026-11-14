@@ -765,6 +765,8 @@ static void popn_ws_hook(Ppu *ppu, void *user) {
             ppu->wsSrc[l].vring = 1; ppu->wsSrc[l].clamp = false;
         }
     }
+    /* the vertical scroll each source's anchor belongs to (see Ppu.wsSrc refV) */
+    for (int l = 0; l < 4; l++) ppu->wsSrc[l].refV = ppu->bgLayer[l].vScroll & 0x3ff;
     /* without a verified playfield source there is nothing correct to show at the sides */
     ppu->wsBlank = !ppu->wsSrc[0].valid;
     /* diagnostics: a gameplay screen (status bar on BG3 at its -4 offset) that still fell back
@@ -869,6 +871,7 @@ typedef struct {
     float ex[4][240];
     float sox[128];
     uint8_t hud[128];             /* the sprite stays put on the screen (status bar) */
+    uint8_t nooff[128];           /* the sprite gets no offset (hud, or off the playfield's scrolling lines) */
     int steady;                   /* some offset isn't 0: the real frame is drawn, not shown as is */
     int st_ok;                    /* the offsets were worked out (else all are 0) */
     /* the palette each line was drawn with: games change it during the frame (fades, colour
@@ -1058,7 +1061,7 @@ static int ip_hud_has(uint16_t key, int x, int y) {
     return 0;
 }
 static void ip_steady(IpFrame *f, const IpFrame *pv) {
-    memset(f->ex, 0, sizeof f->ex); memset(f->sox, 0, sizeof f->sox); memset(f->hud, 0, sizeof f->hud);
+    memset(f->ex, 0, sizeof f->ex); memset(f->sox, 0, sizeof f->sox); memset(f->hud, 0, sizeof f->hud); memset(f->nooff, 0, sizeof f->nooff);
     f->steady = 0;
     if (g_ip_steady < 0) g_ip_steady = getenv("POPN_IP_NOSTEADY") == NULL;
     int ok = g_ip_steady && f->valid && pv->valid && !f->mixed_blank && !pv->mixed_blank;
@@ -1130,7 +1133,7 @@ static void ip_steady(IpFrame *f, const IpFrame *pv) {
             } else {
                 const Ppu *c1 = (const Ppu *)((const uint8_t *)f->regs[line] - RG_START);
                 const Ppu *c0 = (const Ppu *)((const uint8_t *)pv->regs[line] - RG_START);
-                moved = f->has[line] && pv->has[line] && ((c1->bgLayer[0].hScroll - c0->bgLayer[0].hScroll) & 0x3ff);
+                moved = f->has[line] && pv->has[line] && (((c1->bgLayer[0].hScroll - c0->bgLayer[0].hScroll) & 0x3ff) || ((c1->bgLayer[0].vScroll - c0->bgLayer[0].vScroll) & 0x3ff));
             }
             if (moved) {
                     for (int j = 0; j < 128; j++) {
@@ -1144,9 +1147,9 @@ static void ip_steady(IpFrame *f, const IpFrame *pv) {
                     }
             }
         }
-        if (ip_hud_has(key, x, y)) { f->hud[i] = 1; continue; }
+        if (ip_hud_has(key, x, y)) { f->hud[i] = f->nooff[i] = 1; continue; }
         /* only on the playfield: lines where it has scrolled lately (the status bar's never do) */
-        if (!g_field_age[line] || g_field_age[line] > 120) { f->hud[i] = 1; continue; }
+        if (!g_field_age[line] || g_field_age[line] > 120) { f->nooff[i] = 1; continue; }
         float fx = ip_object_frac(f, f->tag[i], 7);
         f->sox[i] = (fx > 0 ? fx : 0) - f->ex[0][line];
         if (f->sox[i] != 0) f->steady = 1;
@@ -1427,14 +1430,22 @@ static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, i
              * the game also draws screen-fixed sprites (the status bar) while an object is
              * current. Known sprite motion is kept: it is whole pixels and lands exactly on the
              * next real frame. */
+            /* An object changing shape (a branch bending under the heroine) has its pieces move
+             * about within it, so for a sprite not known to stay put on the screen (the status
+             * bar: Ip.hud, known while steady motion runs) any of its object's sprites nearby,
+             * of any size, will do. Otherwise it would stay where it is now while the background
+             * it grows from moves on, and come apart from it. */
             float odx, ody;
             if (!have && !g_ip_noobj && ys[1][i] < 240 && ip_object_motion(prev, cur, i, &odx, &ody)) {
                 float px = xs[1][i] - odx, py = ys[1][i] - ody;
+                int loose = cur->st_ok && !cur->hud[i];
+                float tol = loose ? 24.0f : 1.0f;
                 for (int j = 0; j < 128; j++) {
-                    if (prev->tag[j] != cur->tag[i] || sz[0][j] != sz[1][i]) continue;
+                    if (prev->tag[j] != cur->tag[i] || (!loose && sz[0][j] != sz[1][i])) continue;
+                    if (ys[0][j] >= 224 && ys[0][j] < 240) continue;
                     float ex = fabsf(fmodf(xs[0][j] - px + 768.0f, 512.0f) - 256.0f);
                     float ey = fabsf(fmodf(ys[0][j] - py + 384.0f, 256.0f) - 128.0f);
-                    if (ex <= 1.0f && ey <= 1.0f) {
+                    if (ex <= tol && ey <= tol) {
                         /* in whole pixels as the game drew it: the change of the objects' fractions
                          * isn't part of the move from one drawn position to the other */
                         float a0 = ip_object_frac(prev, cur->tag[i], 7), a1 = ip_object_frac(cur, cur->tag[i], 7);
@@ -1445,10 +1456,18 @@ static int ip_render(Ppu *p, const IpFrame *cur, const IpFrame *prev, float t, i
                     }
                 }
             }
+            /* Still unknown (new artwork every frame, and no object to follow: the tip of a branch
+             * bending under the heroine, whose base is background): it moves with the background
+             * behind it rather than standing still on the screen, so it stays joined to what it
+             * grows from while the view scrolls. Sprites that do stay put on the screen (the
+             * status bar) are known (Ip.hud, while steady motion runs) and keep still. */
+            if (!have && cur->st_ok && !cur->hud[i] && ys[1][i] < 224 && (wdx[i] || wdy[i])) {
+                mdx = (float)wdx[i]; mdy = (float)wdy[i]; have = 1;
+            }
             /* steady motion: where this sprite really is drawn now (so1) and was drawn in the
              * previous frame (so0), relative to the game's whole-pixel positions */
             float so1 = cur->sox[i], so0 = 0;
-            if (have && !cur->hud[i] && prev->st_ok) {
+            if (have && !cur->nooff[i] && prev->st_ok) {
                 int l0 = ys[1][i] - (int)mdy + 8; if (l0 < 1) l0 = 1; if (l0 > 239) l0 = 239;
                 float f0 = ip_object_frac(prev, cur->tag[i], 7);
                 if (f0 < 0) f0 = so1 + cur->ex[0][ys[1][i] + 8 < 1 ? 1 : ys[1][i] + 8 > 239 ? 239 : ys[1][i] + 8];

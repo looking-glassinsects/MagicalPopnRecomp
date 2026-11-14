@@ -182,6 +182,8 @@ struct Ppu {
     bool vring;           // rows wrap like the hardware map (VRAM-backed source) instead of rdelta
     bool clamp;           // if set, only x + hScroll in [lxMin, lxMax) is inside the map
     int lxMin, lxMax;
+    int refV;             // the (10-bit) vScroll rdelta was found at: a scroll on the other side of
+                          // the 1024 wrap from it (an in-between picture) is counted from there
   } wsSrc[4];
   // [widescreen] one pixel per dot, pitch PPU_WS_PITCH bytes, x = -PPU_WS_MAX at offset 0
   uint8_t wsBuffer[PPU_WS_PITCH * 239 * 2];

@@ -56,7 +56,8 @@ Levels are rendered wider rather than stretched, so the pixels keep their shape 
 > [!NOTE]
 > Linux support is planned, once the game is in a comfortable state on Windows.
 
-The game is placed in a `MagicalPopn` folder next to the builder, and you can move that folder anywhere.
+The game is built into the same folder as the builder (choose another under **Install to**), and you can
+move `MagicalPopn.exe` with its `states` folder and `settings.ini` anywhere.
 The download includes its own C compiler ([llvm-mingw](https://github.com/mstorsjo/llvm-mingw),
 clang + lld, trimmed to 64-bit Windows) in the `toolchain` folder, so the builder never needs
 Visual Studio or Python.

@@ -66,6 +66,7 @@ static int ppu_getPixel(Ppu* ppu, int x, int y, bool sub, int* r, int* g, int* b
 static uint16_t ppu_getOffsetValue(Ppu* ppu, int col, int row);
 static int ppu_getPixelForBgLayer(Ppu* ppu, int x, int y, int layer, int priority);
 static int ppu_getPixelForBgSource(Ppu* ppu, int x, int y, int layer, int priority);
+static inline int ppu_srcUnwrapDy(const Ppu* ppu, int l);
 static void ppu_makeChunky(void);
 static void ppu_composeLine(Ppu* ppu, int y, int ws);
 static int ppu_decodeBgTile(Ppu* ppu, uint16_t tile, int x, int y, int layer, int priority);
@@ -408,10 +409,11 @@ static void ppu_renderBgSpan(Ppu* ppu, int line, int l, uint16_t* out) {
 // mosaic, from its tile source, one tile row at a time: the values ppu_getPixelForBgSource gives.
 static void ppu_renderBgSourceSpan(Ppu* ppu, int line, int l, int x0, int x1, uint16_t* out) {
   const BgLayer* bg = &ppu->bgLayer[l];
-  int y = line + bg->vScroll;             // as ppu_getPixel passes it (not wrapped)
+  int y0 = line + bg->vScroll;            // as ppu_getPixel passes it (not wrapped)
+  int y = y0 + ppu_srcUnwrapDy(ppu, l);
   int tileBits = bg->bigTiles ? 4 : 3, tw = 1 << tileBits;
   // the page (see ppu_getPixelForBgSource): worked out by one ordinary call, which caches it
-  if(x0 < x1) (void) ppu_getPixelForBgSource(ppu, x0 + bg->hScroll, y, l, 2);
+  if(x0 < x1) (void) ppu_getPixelForBgSource(ppu, x0 + bg->hScroll, y0, l, 2);
   int page = 0;
   if(!ppu->wsSrc[l].vring && ppu->wsSrc[l].refCol >= 0 && ((bg->hScroll & 0x3ff) >> tileBits) != ppu->wsSrc[l].refCol)
     page = ppu->wsPg[l];
@@ -952,8 +954,20 @@ static int ppu_getPixelForBgLayer(Ppu* ppu, int x, int y, int layer, int priorit
   return ppu_decodeBgTile(ppu, tile, x, y, layer, priority);
 }
 
+// [widescreen] y = line + vScroll, as a level-map source counts it: from the scroll its anchor was
+// found at (refV), not across the scroll's 1024 wrap. A view moving up or down past the wrap
+// between two frames otherwise puts an in-between picture's rows 64 tiles away. (Across, the page
+// lookup in ppu_getPixelForBgSource already finds the right columns; a source that wraps like the
+// hardware map needs nothing.)
+static inline int ppu_srcUnwrapDy(const Ppu* ppu, int l) {
+  if(ppu->wsSrc[l].vring) return 0;
+  int v = ppu->bgLayer[l].vScroll & 0x3ff, r = ppu->wsSrc[l].refV;
+  return (((v - r + 512) & 1023) - 512) + r - v;
+}
+
 // [widescreen] fetch the tile word from wsSrc instead of VRAM; x is unwrapped (may be < 0 or > 1023)
 static int ppu_getPixelForBgSource(Ppu* ppu, int x, int y, int layer, int priority) {
+  y += ppu_srcUnwrapDy(ppu, layer);
   int tileBits = ppu->bgLayer[layer].bigTiles ? 4 : 3;
   int tw = 1 << tileBits;
   // a band of lines scrolled elsewhere than where the source was matched (a scene drawn in bands

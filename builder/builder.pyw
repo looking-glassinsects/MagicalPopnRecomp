@@ -80,12 +80,20 @@ def show_path(p):
     return str(p).replace("\\", "/")
 
 
+# The game is installed where the Builder is: the folder Builder.exe was run from (from the source
+# tree, its MagicalPopn folder, which git ignores). Never a folder remembered from another copy of
+# the Builder; "Install to" changes it for one run.
+DEFAULT_OUT = APP_DIR if FROZEN else APP_DIR / "MagicalPopn"
+
+
 def load_prefs():
     try:
-        return json.loads(PREFS.read_text(encoding="utf-8"))
+        p = json.loads(PREFS.read_text(encoding="utf-8"))
     except Exception:
         lang = 1 if (locale.getlocale()[0] or "").lower().startswith(("ja", "japanese")) else 0
-        return {"lang": lang, "rom": "", "out": str(APP_DIR / "MagicalPopn")}
+        p = {"lang": lang, "rom": ""}
+    p["out"] = str(DEFAULT_OUT)
+    return p
 
 
 PERSIST = True      # False while updating a game: that run's ROM and folder aren't the user's choices

@@ -305,7 +305,8 @@ def build(rom_path, out_dir=None, thorough=None, force_unknown=False,
         os.replace(exe, old)
         shutil.copy2(exe_tmp, exe)
         log("  the game was running: the new version is installed and starts next time")
-    (out / "README.txt").write_text(README_TXT, encoding="utf-8")
+    # (in the Builder's own folder, its README.txt stays: the game's gets its own name)
+    (out / ("MagicalPopn README.txt" if (out / "Builder.exe").exists() else "README.txt")).write_text(README_TXT, encoding="utf-8")
     summary = {
         "rom": info, "routines": nfuncs, "lines_of_c": nlines, "coverage_percent": round(cov_pct, 2) if n_exec else None,
         "passes": build_pass, "seconds": round(time.time() - t_start), "exe": str(exe),
