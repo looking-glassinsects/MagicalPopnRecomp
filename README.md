@@ -28,7 +28,7 @@ program, with a small menu for window size, fullscreen, smoothing, FPS, volume, 
 > The builder reads it on your PC and produces `MagicalPopn.exe`.
 
 > [!NOTE]
-> This is version **0.9.6**, so there is a slight chance of bugs. If you find one, please
+> This is version **0.9.7**, so there is a slight chance of bugs. If you find one, please
 > [open an issue](https://github.com/looking-glassinsects/MagicalPopnRecomp/issues/new), ideally with a save state (F5) or a screenshot (F12).
 
 ## Native 16:9 widescreen

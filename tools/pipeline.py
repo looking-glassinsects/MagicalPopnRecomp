@@ -43,7 +43,7 @@ RUNTIME_SRC = ["main.c", "rt.c", "hw.c", "platform_win32.c", "pad_win32.c", "men
 PIPELINE_VERSION = 3
 # This version of the project. A release is tagged "v" + VERSION; the game compares its own
 # VERSION with the newest release's tag to offer an update (runtime/update_win32.c).
-VERSION = "0.9.6"
+VERSION = "0.9.7"
 
 SESSIONS = [("attract", 1, 7200), ("menus", 1, 14400), ("menus", 2, 14400)] + \
            [("play", s, 43200) for s in range(1, 13)]
